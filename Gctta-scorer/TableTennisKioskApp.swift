@@ -2,64 +2,66 @@ import SwiftUI
 import FirebaseCore
 
 class AppDelegate: NSObject, UIApplicationDelegate {
-    func application(_ application: UIApplication,
-                     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
-        FirebaseApp.configure()
-        return true
-    }
+  func application(_ application: UIApplication,
+                   didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey : Any]? = nil) -> Bool {
+    FirebaseApp.configure()
+    return true
+  }
 }
 
 @main
 struct TableTennisKioskApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @StateObject var fsManager = FirestoreManager()
     @State private var path = NavigationPath()
-    
+
     var body: some Scene {
         WindowGroup {
             NavigationStack(path: $path) {
-                LobbyView(path: $path)
-                    .navigationDestination(for: Fixture.self) { fixture in
-                        MatchSetupView(fsManager: FirestoreManager(), fixture: fixture, path: $path)
-                    }
-                    .navigationDestination(for: ScoreboardConfig.self) { config in
-                        ScoreboardView(config: config, path: $path)
-                    }
-            }
-        }
-    }
-}
-
-struct LobbyView: View {
-    @Binding var path: NavigationPath
-    @StateObject var fsManager = FirestoreManager()
-    @State private var fixtures: [Fixture] = []
-    
-    var body: some View {
-        ScrollView {
-            if fixtures.isEmpty {
-                ContentUnavailableView("No Matches Today", systemImage: "calendar")
-            } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 250))], spacing: 20) {
-                    ForEach(fixtures) { fixture in
-                        Button {
-                            path.append(fixture)
-                        } label: {
-                            VStack(spacing: 10) {
-                                Text("Table \(fixture.table)").font(.system(size: 40, weight: .black))
-                                Text("\(fixture.homeTeam) vs \(fixture.awayTeam)").font(.headline)
-                                Text(fixture.division).font(.subheadline).opacity(0.8)
-                            }
-                            .frame(height: 180).frame(maxWidth: .infinity)
-                            .background(Color.blue.gradient).foregroundColor(.white)
-                            .cornerRadius(15).shadow(radius: 5)
+                VStack {
+                    if fsManager.liveFixtures.isEmpty {
+                        VStack(spacing: 20) {
+                            Image(systemName: "wifi.exclamationmark")
+                                .font(.system(size: 60))
+                                .foregroundColor(.gray)
+                            Text("No Fixtures Found for Today")
+                                .font(.title)
+                                .foregroundColor(.secondary)
+                            Text("Ensure the iPad date matches the Fixture date in Firebase.")
+                                .font(.caption)
                         }
+                    } else {
+                        List(fsManager.liveFixtures) { fixture in
+                            NavigationLink(value: fixture) {
+                                HStack {
+                                    Text("Table \(fixture.table)")
+                                        .font(.title3.bold())
+                                        .frame(width: 80, alignment: .leading)
+                                        .foregroundColor(.yellow)
+                                    
+                                    VStack(alignment: .leading) {
+                                        Text("\(fixture.homeTeam) vs \(fixture.awayTeam)")
+                                            .font(.headline)
+                                        Text(fixture.division)
+                                            .font(.subheadline)
+                                            .foregroundColor(.gray)
+                                    }
+                                }
+                                .padding(.vertical, 8)
+                            }
+                        }
+                        .listStyle(.insetGrouped)
                     }
-                }.padding()
+                }
+                .navigationTitle("Select Fixture")
+                .navigationDestination(for: Fixture.self) { fixture in
+                    MatchSetupView(fsManager: fsManager, fixture: fixture, path: $path)
+                }
+                .navigationDestination(for: ScoreboardConfig.self) { config in
+                    ScoreboardView(config: config, path: $path)
+                }
             }
-        }
-        .navigationTitle("Match Lobby")
-        .task {
-            do { fixtures = try await fsManager.fetchSmartLaunchFixtures() } catch { print("Error: \(error)") }
+            .preferredColorScheme(.dark)
         }
     }
 }

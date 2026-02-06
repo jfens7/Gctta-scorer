@@ -10,7 +10,7 @@ struct MatchSetupView: View {
     @State private var selectedHome: Set<String> = []
     @State private var selectedAway: Set<String> = []
     
-    @State private var playedPairs: Set<String> = [] // The block list
+    @State private var playedPairs: Set<String> = []
     @State private var showingErrorAlert = false
     @State private var errorMessage = ""
     
@@ -21,7 +21,7 @@ struct MatchSetupView: View {
     @State private var selectedInitialServer = ""
     @State private var selectedInitialReceiver = ""
     @State private var serverStartsOnWall = true
-    @State private var isTestMatch = true
+    @State private var isTestMatch = false // Default to false for real matches
     
     @State private var showingSearchSheet = false
     @State private var activeSearchTeamIsHome = true
@@ -133,7 +133,7 @@ struct MatchSetupView: View {
     var slotsNeeded: Int { matchType == .singles ? 1 : 2 }
     var canProceed: Bool { selectedHome.count == slotsNeeded && selectedAway.count == slotsNeeded }
     
-    // MARK: - Validation Logic (CRITICAL FIX 2)
+    // MARK: - Validation Logic
     func validateAndProceed() {
         if matchType == .singles {
             if let homeP = selectedHome.first, let awayP = selectedAway.first {
@@ -232,7 +232,7 @@ struct TeamSelectionColumn: View {
                         }
                         .disabled(isDisabled)
                     }
-                    Button(action: onAdd) { Label("Fill-in", systemImage: "person.badge.plus").frame(maxWidth: .infinity).padding().background(Color.gray.opacity(0.05)).foregroundColor(.secondary).cornerRadius(10) }
+                    Button(action: onAdd) { Label("Add / Search Player", systemImage: "person.badge.plus").frame(maxWidth: .infinity).padding().background(Color.gray.opacity(0.1)).foregroundColor(.primary).cornerRadius(10) }
                 }
             }
         }
@@ -271,18 +271,49 @@ struct TossView: View {
     }
 }
 
+// NEW: Updated Search Sheet with Add Feature
 struct PlayerSearchSheet: View {
     @ObservedObject var fsManager: FirestoreManager
     var onSelect: (Player) -> Void
     @Environment(\.dismiss) var dismiss
     @State private var searchText = ""
     @State private var searchResults: [Player] = []
+    @State private var isAdding = false
+    
     var body: some View {
         NavigationStack {
-            List(searchResults) { player in
-                Button(player.name) { onSelect(player); dismiss() }
-            }.searchable(text: $searchText).onChange(of: searchText) { _, nv in
+            List {
+                ForEach(searchResults) { player in
+                    Button(action: { onSelect(player); dismiss() }) {
+                        HStack {
+                            Text(player.name)
+                            if player.isProvisional == true { Text("(New)").font(.caption).foregroundColor(.orange) }
+                        }
+                    }
+                }
+                
+                if !searchText.isEmpty && searchResults.isEmpty {
+                    Section {
+                        Button(action: addNewPlayer) {
+                            Label("Add new player: \"\(searchText)\"", systemImage: "plus.circle.fill")
+                                .foregroundColor(.green)
+                        }
+                    }
+                }
+            }
+            .searchable(text: $searchText)
+            .onChange(of: searchText) { _, nv in
                 Task { searchResults = (try? await fsManager.searchPlayers(query: nv)) ?? [] }
+            }
+            .navigationTitle("Search Players")
+        }
+    }
+    
+    func addNewPlayer() {
+        Task {
+            if let p = try? await fsManager.addNewPlayer(name: searchText) {
+                onSelect(p)
+                dismiss()
             }
         }
     }
