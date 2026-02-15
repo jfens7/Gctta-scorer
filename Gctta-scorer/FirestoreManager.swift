@@ -41,12 +41,11 @@ struct SavedMatchState {
     let activeTime: Int
     let lastSetServer: String
     let lastSetReceiver: String
-    // NEW: The "Alpha" Pair from Set 1 to lock rotation
     let initialMatchServer: String
     let initialMatchReceiver: String
 }
 
-struct ScoreboardConfig: Hashable {
+struct ScoreboardConfig: Hashable, Codable {
     let fixture: Fixture
     let homePlayers: [String]
     let awayPlayers: [String]
@@ -97,7 +96,7 @@ class FirestoreManager: ObservableObject {
             }
     }
     
-    // MARK: - RESUME LOGIC
+    // MARK: - RESUME & REVIEW LOGIC
     func fetchSavedState(fixtureId: String) async -> SavedMatchState? {
         do {
             let doc = try await db.collection("fixture_schedule").document(fixtureId).getDocument()
@@ -128,6 +127,13 @@ class FirestoreManager: ObservableObject {
                 initialMatchReceiver: data["initial_match_receiver"] as? String ?? ""
             )
         } catch { return nil }
+    }
+    
+    func flagMatchForReview(fixtureId: String) {
+        db.collection("fixture_schedule").document(fixtureId).updateData([
+            "match_status": "REVIEW NEEDED",
+            "admin_note": "iPad app closed mid-match and user declined to resume."
+        ])
     }
     
     private func parseTime(_ str: String) -> Int {
@@ -183,8 +189,20 @@ class FirestoreManager: ObservableObject {
         return played
     }
     
+    // MARK: - TIMELINE LOGGING
+    func saveTimelineEvent(fixtureId: String?, data: [String: Any]) {
+        guard let fid = fixtureId else { return }
+        var eventData = data
+        eventData["timestamp"] = FieldValue.serverTimestamp()
+        
+        db.collection("fixture_schedule").document(fid)
+            .collection("timeline")
+            .addDocument(data: eventData)
+    }
+    
     // MARK: - UPDATE LIVE
-    func updateLiveScore(fixtureId: String?, homeScore: Int, awayScore: Int, homeSets: Int, awaySets: Int, server: String, receiver: String, timerLabel: String?, timerValue: Int, totalTime: String, activeTime: String, homePlayers: [String], awayPlayers: [String], leftPlayers: [String], rightPlayers: [String], matchStatus: String, gameStats: [String: Any], setHistory: [SetRecord], lastSetServer: String, lastSetReceiver: String, initialMatchServer: String, initialMatchReceiver: String) {
+    func updateLiveScore(fixtureId: String?, homeScore: Int, awayScore: Int, homeSets: Int, awaySets: Int, server: String, receiver: String, timerLabel: String?, timerValue: Int, totalTime: String, activeTime: String, homePlayers: [String], awayPlayers: [String], leftPlayers: [String], rightPlayers: [String], matchStatus: String, gameStats: [String: Any], setHistory: [SetRecord], lastSetServer: String, lastSetReceiver: String, initialMatchServer: String, initialMatchReceiver: String, gameHistoryString: String) {
+        
         guard let fid = fixtureId else { return }
         
         let historyJson = (try? JSONEncoder().encode(setHistory)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
@@ -207,9 +225,9 @@ class FirestoreManager: ObservableObject {
             "left_players": leftPlayers,
             "right_players": rightPlayers,
             "set_history_json": historyJson,
+            "game_scores_history": gameHistoryString,
             "last_set_start_server": lastSetServer,
             "last_set_start_receiver": lastSetReceiver,
-            // NEW: Persistence for Doubles Logic
             "initial_match_server": initialMatchServer,
             "initial_match_receiver": initialMatchReceiver
         ]
