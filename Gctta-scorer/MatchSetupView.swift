@@ -21,7 +21,7 @@ struct MatchSetupView: View {
     @State private var selectedInitialServer = ""
     @State private var selectedInitialReceiver = ""
     @State private var serverStartsOnWall = true
-    @State private var isTestMatch = false // Default to false for real matches
+    @State private var isTestMatch = false
     
     @State private var showingSearchSheet = false
     @State private var activeSearchTeamIsHome = true
@@ -271,14 +271,13 @@ struct TossView: View {
     }
 }
 
-// NEW: Updated Search Sheet with Add Feature
+// MARK: - UPDATED SEARCH SHEET
 struct PlayerSearchSheet: View {
     @ObservedObject var fsManager: FirestoreManager
     var onSelect: (Player) -> Void
     @Environment(\.dismiss) var dismiss
     @State private var searchText = ""
     @State private var searchResults: [Player] = []
-    @State private var isAdding = false
     
     var body: some View {
         NavigationStack {
@@ -302,8 +301,21 @@ struct PlayerSearchSheet: View {
                 }
             }
             .searchable(text: $searchText)
+            .task {
+                // LOAD ALL PLAYERS INITIALLY
+                if let players = try? await fsManager.fetchAllPlayers() {
+                    searchResults = players
+                }
+            }
             .onChange(of: searchText) { _, nv in
-                Task { searchResults = (try? await fsManager.searchPlayers(query: nv)) ?? [] }
+                Task {
+                    if nv.isEmpty {
+                        // RE-LOAD ALL IF SEARCH CLEARED
+                        searchResults = (try? await fsManager.fetchAllPlayers()) ?? []
+                    } else {
+                        searchResults = (try? await fsManager.searchPlayers(query: nv)) ?? []
+                    }
+                }
             }
             .navigationTitle("Search Players")
         }

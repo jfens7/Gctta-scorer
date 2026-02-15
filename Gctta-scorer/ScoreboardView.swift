@@ -1,14 +1,15 @@
 import SwiftUI
 
-// Snapshot for Undo functionality
 struct PointSnapshot {
-    let leftScore: Int
-    let rightScore: Int
-    let setHistory: [SetRecord]
-    let leftPlayers: [String]
-    let rightPlayers: [String]
-    let serverName: String
-    let hasSwappedInDecider: Bool
+    let leftScore: Int; let rightScore: Int; let setHistory: [SetRecord]
+    let leftPlayers: [String]; let rightPlayers: [String]; let serverName: String; let receiverName: String
+    let hasSwappedInDecider: Bool; let pointLog: [PointRecord]
+    let initialServerOfSet: String; let initialReceiverOfSet: String
+}
+
+struct PointRecord {
+    let winnerIsHome: Bool
+    let serverIsHome: Bool
 }
 
 struct ScoreboardView: View {
@@ -20,33 +21,48 @@ struct ScoreboardView: View {
     @State private var leftScore = 0
     @State private var rightScore = 0
     @State private var setHistory: [SetRecord] = []
+    @State private var pointLog: [PointRecord] = []
     @State private var currentBestOf: Int
     
     // Player Positions & Server
     @State private var leftPlayers: [String]
     @State private var rightPlayers: [String]
     @State private var serverName: String
+    @State private var receiverName: String
     
-    // Undo History
+    // Rotation Tracking (Persisted)
+    @State private var initialServerOfSet: String = ""
+    @State private var initialReceiverOfSet: String = ""
+    @State private var originalMatchServer: String = ""
+    @State private var originalMatchReceiver: String = ""
+    
     @State private var undoStack: [PointSnapshot] = []
     
-    // TIMERS & STOPWATCHES (NEW)
+    // TIMERS
     @State private var timer: Timer?
     @State private var totalSeconds = 0
     @State private var activeSeconds = 0
-    @State private var isMatchActive = false
-    @State private var isPlayActive = false // True when ball is in play (no timeout)
+    @State private var isPaused = false
     
-    // COUNTDOWN TIMERS
+    // LOCKOUT
     @State private var activeCountdownLabel: String? = nil
     @State private var countdownSeconds = 0
     
-    // Overlays
+    // STATE
+    @State private var isLoading = true
+    @State private var showSetConfirmation = false
+    @State private var showExitAlert = false
+    @State private var hasSwappedInDecider = false
     @State private var showHistorySummary = false
     @State private var showCelebration = false
     @State private var showChangeEndsAlert = false
-    @State private var hasSwappedInDecider = false
-    @State private var showSetConfirmation = false
+    
+    // DOUBLES SELECTION STATE
+    @State private var showNextSetServerSelection = false
+    @State private var nextServingTeamName: String = ""
+    @State private var nextServingPlayers: [String] = []
+    
+    var isDoubles: Bool { config.homePlayers.count > 1 }
     
     init(config: ScoreboardConfig, path: Binding<NavigationPath>) {
         self.config = config
@@ -62,170 +78,241 @@ struct ScoreboardView: View {
             _rightPlayers = State(initialValue: config.homePlayers)
         }
         _serverName = State(initialValue: config.initialServerName)
+        _receiverName = State(initialValue: config.initialReceiverName)
+        
+        // Initialize Tracking
+        _initialServerOfSet = State(initialValue: config.initialServerName)
+        _initialReceiverOfSet = State(initialValue: config.initialReceiverName)
+        _originalMatchServer = State(initialValue: config.initialServerName)
+        _originalMatchReceiver = State(initialValue: config.initialReceiverName)
     }
 
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
-                // Header (Format)
+                // HEADER
                 HStack {
                     Text("Table \(config.fixture.table) • Best of \(currentBestOf)").font(.headline.bold()).foregroundColor(.secondary)
                     Spacer()
-                    // STOPWATCH DISPLAY
+                    // TIMERS
                     HStack(spacing: 20) {
                         VStack(alignment: .trailing) {
-                            Text("TOTAL").font(.caption2).bold().foregroundColor(.gray)
+                            Text("MATCH TIME").font(.caption2).bold().foregroundColor(.gray)
                             Text(formatTime(totalSeconds)).font(.title3.monospacedDigit())
                         }
                         VStack(alignment: .trailing) {
-                            Text("ACTIVE").font(.caption2).bold().foregroundColor(.gray)
-                            Text(formatTime(activeSeconds)).font(.title3.monospacedDigit()).foregroundColor(.green)
+                            Text("PLAY TIME").font(.caption2).bold().foregroundColor(.gray)
+                            Text(formatTime(activeSeconds)).font(.title3.monospacedDigit()).foregroundColor(isPaused ? .orange : .green)
                         }
                     }
                     Spacer()
-                    Button("EXIT") { path = NavigationPath() }.foregroundColor(.red).font(.headline.bold())
+                    Button(action: { isPaused.toggle(); syncToFirestore() }) {
+                        HStack { Image(systemName: isPaused ? "play.fill" : "pause.fill"); Text(isPaused ? "RESUME" : "PAUSE") }
+                        .font(.headline.bold()).padding(8).background(isPaused ? Color.green : Color.orange).foregroundColor(.white).cornerRadius(8)
+                    }
+                    Button("EXIT") { showExitAlert = true }.foregroundColor(.red).font(.headline.bold()).padding(.leading, 10)
                 }
                 .padding().background(Color(uiColor: .secondarySystemBackground))
                 
-                // TIMER BUTTONS (NEW)
-                HStack(spacing: 15) {
-                    TimerButton(title: "WARMUP (2:00)", icon: "flame.fill", isActive: activeCountdownLabel == "WARMUP", remaining: countdownSeconds) { startCountdown("WARMUP", 120) }
-                    TimerButton(title: "TIMEOUT (1:00)", icon: "hand.raised.fill", isActive: activeCountdownLabel == "TIMEOUT", remaining: countdownSeconds) { startCountdown("TIMEOUT", 60) }
-                    TimerButton(title: "BREAK (1:00)", icon: "mug.fill", isActive: activeCountdownLabel == "BREAK", remaining: countdownSeconds) { startCountdown("BREAK", 60) }
-                }
-                .padding(10)
-                .background(Color.black.opacity(0.8))
-
-                // Scoreboard Area
-                HStack(spacing: 0) {
-                    ScoreSideView(
-                        names: leftPlayers,
-                        points: leftScore,
-                        sets: setsWon(byHome: leftIsHome),
-                        color: leftIsHome ? .blue : .red,
-                        isServing: leftPlayers.contains(serverName),
-                        label: sideLabel(isLeft: true)
-                    ) {
-                        addPoint(toLeft: true)
+                // SERVICE INDICATOR
+                HStack {
+                    Text("SERVING:").font(.caption.bold()).foregroundColor(.gray)
+                    Text(serverName).font(.title3.bold()).foregroundColor(.yellow)
+                    if isDoubles {
+                        Image(systemName: "arrow.right").font(.body).foregroundColor(.gray)
+                        Text(receiverName).font(.title3.bold()).foregroundColor(.white)
                     }
-                    Divider()
-                    ScoreSideView(
-                        names: rightPlayers,
-                        points: rightScore,
-                        sets: setsWon(byHome: !leftIsHome),
-                        color: !leftIsHome ? .blue : .red,
-                        isServing: rightPlayers.contains(serverName),
-                        label: sideLabel(isLeft: false)
-                    ) {
-                        addPoint(toLeft: false)
+                }
+                .padding(8).frame(maxWidth: .infinity).background(Color.black.opacity(0.6))
+                
+                // TIMEOUTS
+                HStack(spacing: 15) {
+                    TimerButton(title: "HOME T/O", icon: "hand.raised.fill", isActive: activeCountdownLabel == "HOME T/O", remaining: countdownSeconds) { startCountdown("HOME T/O", 60) }
+                    TimerButton(title: "AWAY T/O", icon: "hand.raised.fill", isActive: activeCountdownLabel == "AWAY T/O", remaining: countdownSeconds) { startCountdown("AWAY T/O", 60) }
+                }
+                .padding(10).background(Color.black.opacity(0.8))
+
+                // SCOREBOARD
+                if isLoading {
+                    VStack { Spacer(); ProgressView("Restoring Match..."); Spacer() }
+                } else {
+                    HStack(spacing: 0) {
+                        ScoreSideView(
+                            names: leftPlayers, points: leftScore, sets: setsWon(byHome: leftIsHome),
+                            color: leftIsHome ? .blue : .red, isServing: leftPlayers.contains(serverName),
+                            label: sideLabel(isLeft: true)
+                        ) { addPoint(toLeft: true) }
+                        Divider()
+                        ScoreSideView(
+                            names: rightPlayers, points: rightScore, sets: setsWon(byHome: !leftIsHome),
+                            color: !leftIsHome ? .blue : .red, isServing: rightPlayers.contains(serverName),
+                            label: sideLabel(isLeft: false)
+                        ) { addPoint(toLeft: false) }
                     }
                 }
             }
             
-            // ... (KEEP EXISTING OVERLAYS: showSetConfirmation, showChangeEndsAlert, SummaryOverlay, CelebrationOverlay)
-            // Just ensure they are preserved from previous file. I'll include Set Confirmation as example.
+            // --- OVERLAYS ---
+            
+            if activeCountdownLabel != nil || isPaused {
+                ZStack {
+                    Color.black.opacity(0.6).ignoresSafeArea()
+                    VStack(spacing: 20) {
+                        Text(isPaused ? "MATCH PAUSED" : "\(activeCountdownLabel ?? "BREAK")").font(.largeTitle.bold()).foregroundColor(.white)
+                        if let label = activeCountdownLabel { Text("\(countdownSeconds)s").font(.system(size: 80, weight: .black)).foregroundColor(.yellow) }
+                        Button(action: { stopCountdown(); isPaused = false }) { Text("TAP TO RESUME").font(.title2.bold()).padding(20).background(Color.green).foregroundColor(.white).cornerRadius(15) }
+                    }
+                }
+            }
             
             if showSetConfirmation {
                 ZStack {
-                    Color.black.opacity(0.85).ignoresSafeArea()
-                    VStack(spacing: 25) {
-                        Text("SET FINISHED").font(.title2).bold().foregroundColor(.gray)
-                        Text("\(leftScore) - \(rightScore)").font(.system(size: 60, weight: .black)).foregroundColor(.yellow)
+                    Color.black.opacity(0.9).ignoresSafeArea()
+                    VStack(spacing: 30) {
+                        let potentialWinner = leftScore > rightScore ? leftPlayers.joined(separator: " / ") : rightPlayers.joined(separator: " / ")
+                        let w = max(leftScore, rightScore); let l = min(leftScore, rightScore)
+                        Text("VERIFY SET SCORE").font(.headline).bold().foregroundColor(.gray).tracking(2)
+                        Text("Did \(potentialWinner) win \(w)-\(l)?").font(.system(size: 40, weight: .bold)).multilineTextAlignment(.center).foregroundColor(.white).padding()
+                        HStack(spacing: 50) {
+                            Button(action: undoLastPoint) { VStack{ Image(systemName: "arrow.uturn.backward.circle.fill").font(.largeTitle); Text("NO") }.frame(width: 120, height: 120).background(Color.red).cornerRadius(20).foregroundColor(.white) }
+                            Button(action: confirmSetEnd) { VStack{ Image(systemName: "checkmark.circle.fill").font(.largeTitle); Text("YES") }.frame(width: 120, height: 120).background(Color.green).cornerRadius(20).foregroundColor(.white) }
+                        }
+                    }
+                }
+            }
+            
+            // NEXT SET SERVER SELECTION (DOUBLES ONLY)
+            if showNextSetServerSelection {
+                ZStack {
+                    Color.black.opacity(0.95).ignoresSafeArea()
+                    VStack(spacing: 30) {
+                        Text("Start of Set \(setHistory.count + 1)").font(.headline).foregroundColor(.gray)
+                        Text("\(nextServingTeamName) Serves Next").font(.title).bold().foregroundColor(.white)
+                        Text("Who will serve?").font(.largeTitle.bold()).foregroundColor(.yellow)
+                        
                         HStack(spacing: 40) {
-                            Button("Undo Point") { undoLastPoint() }.font(.title3.bold()).foregroundColor(.red)
-                            Button("Confirm & Next Set") { confirmSetEnd() }.font(.title2.bold()).padding(20).background(Color.green).foregroundColor(.white).cornerRadius(15)
+                            ForEach(nextServingPlayers, id: \.self) { player in
+                                Button(action: { startNewSet(server: player) }) {
+                                    Text(player).font(.title2.bold()).frame(width: 180, height: 100)
+                                        .background(Color.blue).foregroundColor(.white).cornerRadius(15)
+                                }
+                            }
                         }
                     }
                 }
             }
             
             if showHistorySummary {
-                SummaryOverlay(history: $setHistory, homeTeam: config.homePlayers.joined(separator: "/"), awayTeam: config.awayPlayers.joined(separator: "/")) {
-                    finishMatch()
-                } onCancel: { showHistorySummary = false }
+                SummaryOverlay(history: $setHistory, homeTeam: config.homePlayers.joined(separator: "/"), awayTeam: config.awayPlayers.joined(separator: "/")) { finishMatch() } onCancel: { showHistorySummary = false }
             }
         }
         .navigationBarBackButtonHidden(true)
-        .onAppear { startMasterClock() }
+        .onAppear {
+            if config.isResume { resumeMatch() }
+            else { isLoading = false; startMasterClock(); startCountdown("WARMUP", 120) }
+        }
         .onDisappear { stopMasterClock() }
+        .alert("Exit Match?", isPresented: $showExitAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Save & Exit", role: .destructive) { syncToFirestore(); path = NavigationPath() }
+        } message: { Text("Match progress will be saved.") }
     }
 
-    // MARK: - TIMER LOGIC
-    func startMasterClock() {
-        isMatchActive = true
-        isPlayActive = true
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            totalSeconds += 1
-            
-            // Countdown Logic
-            if let _ = activeCountdownLabel, countdownSeconds > 0 {
-                countdownSeconds -= 1
-                if countdownSeconds <= 0 {
-                    stopCountdown() // Auto resume play
+    // MARK: - RESUME LOGIC
+    func resumeMatch() {
+        guard let fid = config.fixture.id else { isLoading = false; return }
+        Task {
+            if let savedState = await fsManager.fetchSavedState(fixtureId: fid) {
+                if savedState.leftPlayers == config.homePlayers {
+                    leftScore = savedState.homeScore; rightScore = savedState.awayScore
+                } else {
+                    leftScore = savedState.awayScore; rightScore = savedState.homeScore
                 }
-            } else if isPlayActive {
-                activeSeconds += 1
-            }
-            
-            // Sync to Firestore every 5s to save writes, or every 1s if Timer is running
-            if activeCountdownLabel != nil || totalSeconds % 5 == 0 {
-                syncToFirestore()
-            }
+                leftPlayers = savedState.leftPlayers; rightPlayers = savedState.rightPlayers
+                setHistory = savedState.setHistory
+                serverName = savedState.server
+                receiverName = savedState.receiver
+                totalSeconds = savedState.totalTime
+                activeSeconds = savedState.activeTime
+                initialServerOfSet = savedState.lastSetServer
+                initialReceiverOfSet = savedState.lastSetReceiver
+                originalMatchServer = savedState.initialMatchServer
+                originalMatchReceiver = savedState.initialMatchReceiver
+                
+                isLoading = false; isPaused = true; startMasterClock()
+            } else { isLoading = false }
         }
     }
-    
-    func stopMasterClock() {
-        timer?.invalidate()
-        timer = nil
-    }
-    
-    func startCountdown(_ label: String, _ duration: Int) {
-        activeCountdownLabel = label
-        countdownSeconds = duration
-        isPlayActive = false // Pause active play stats
-        syncToFirestore()
-    }
-    
-    func stopCountdown() {
-        activeCountdownLabel = nil
-        countdownSeconds = 0
-        isPlayActive = true // Resume play
-        syncToFirestore()
-    }
-    
-    func formatTime(_ seconds: Int) -> String {
-        let m = seconds / 60
-        let s = seconds % 60
-        return String(format: "%02d:%02d", m, s)
-    }
 
-    // MARK: - SCORING LOGIC
+    // MARK: - LOGIC
+    func startMasterClock() {
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            totalSeconds += 1
+            if let _ = activeCountdownLabel, countdownSeconds > 0 { countdownSeconds -= 1; if countdownSeconds <= 0 { stopCountdown() } }
+            else if !isPaused { activeSeconds += 1 }
+            if activeCountdownLabel != nil || totalSeconds % 5 == 0 { syncToFirestore() }
+        }
+    }
+    func stopMasterClock() { timer?.invalidate(); timer = nil }
+    func startCountdown(_ label: String, _ duration: Int) { activeCountdownLabel = label; countdownSeconds = duration; syncToFirestore() }
+    func stopCountdown() { activeCountdownLabel = nil; countdownSeconds = 0; syncToFirestore() }
+    func formatTime(_ seconds: Int) -> String { String(format: "%02d:%02d", seconds / 60, seconds % 60) }
+
     var leftIsHome: Bool { leftPlayers == config.homePlayers }
     var setsNeededToWin: Int { Int(ceil(Double(currentBestOf) / 2.0)) }
-    
-    func setsWon(byHome: Bool) -> Int {
-        byHome ? setHistory.filter { $0.homeScore > $0.awayScore }.count : setHistory.filter { $0.awayScore > $0.homeScore }.count
-    }
-    
+    var isTimerLocked: Bool { activeCountdownLabel != nil || isPaused }
+    func setsWon(byHome: Bool) -> Int { byHome ? setHistory.filter { $0.homeScore > $0.awayScore }.count : setHistory.filter { $0.awayScore > $0.homeScore }.count }
     func sideLabel(isLeft: Bool) -> String {
         let wallSide = VenueMapper.wallSide(for: config.fixture.table)
         return (isLeft && wallSide == .left) || (!isLeft && wallSide == .right) ? "WALL SIDE" : "GRANDSTAND SIDE"
     }
     
     func addPoint(toLeft: Bool) {
-        // Any score interaction cancels current timers (except maybe Warmup?)
-        if activeCountdownLabel != nil { stopCountdown() }
-        
+        if isTimerLocked { return }
         saveSnapshot()
+        let serverIsHome = config.homePlayers.contains(serverName)
+        let winnerIsHome = toLeft ? leftIsHome : !leftIsHome
+        pointLog.append(PointRecord(winnerIsHome: winnerIsHome, serverIsHome: serverIsHome))
         if toLeft { leftScore += 1 } else { rightScore += 1 }
-        
+        if (leftScore + rightScore) % 2 == 0 { rotateServer() }
         syncToFirestore()
-        
-        if (leftScore >= 11 || rightScore >= 11) && abs(leftScore - rightScore) >= 2 {
-            showSetConfirmation = true
+        if (leftScore >= 11 || rightScore >= 11) && abs(leftScore - rightScore) >= 2 { showSetConfirmation = true }
+        else { checkDeciderSwap() }
+    }
+    
+    func rotateServer() {
+        if isDoubles {
+            // DOUBLES ROTATION A->X, X->B, B->Y, Y->A
+            let hA = config.homePlayers[0]; let hB = config.homePlayers[1]
+            let aX = config.awayPlayers[0]; let aY = config.awayPlayers[1]
+            if serverName == hA { serverName = aX; receiverName = hB }
+            else if serverName == aX { serverName = hB; receiverName = aY }
+            else if serverName == hB { serverName = aY; receiverName = hA }
+            else if serverName == aY { serverName = hA; receiverName = aX }
+            else { serverName = hA; receiverName = aX }
         } else {
-            if (leftScore + rightScore) % 2 == 0 { rotateServer() }
-            checkDeciderSwap()
+            // Singles
+            serverName = leftPlayers.contains(serverName) ? (rightPlayers.first ?? "") : (leftPlayers.first ?? "")
+            receiverName = ""
+        }
+    }
+    
+    func checkDeciderSwap() {
+        let currentSetNumber = setHistory.count + 1
+        if currentSetNumber == currentBestOf {
+            if !hasSwappedInDecider && (leftScore == 5 || rightScore == 5) {
+                swapSides(); let temp = leftScore; leftScore = rightScore; rightScore = temp
+                hasSwappedInDecider = true; showChangeEndsAlert = true
+                if isDoubles {
+                    // SWAP RECEIVER (A->X becomes A->Y)
+                    let aX = config.awayPlayers[0]; let aY = config.awayPlayers[1]
+                    let hA = config.homePlayers[0]; let hB = config.homePlayers[1]
+                    if receiverName == aX { receiverName = aY }
+                    else if receiverName == aY { receiverName = aX }
+                    else if receiverName == hA { receiverName = hB }
+                    else if receiverName == hB { receiverName = hA }
+                }
+            }
         }
     }
     
@@ -233,119 +320,125 @@ struct ScoreboardView: View {
         let newRecord = SetRecord(setNumber: setHistory.count + 1, homeScore: leftIsHome ? leftScore : rightScore, awayScore: leftIsHome ? rightScore : leftScore)
         var updatedHistory = setHistory; updatedHistory.append(newRecord); setHistory = updatedHistory
         leftScore = 0; rightScore = 0; hasSwappedInDecider = false; showSetConfirmation = false
-        
-        // AUTO BREAK
-        if !isMatchFinished() {
-            startCountdown("BREAK", 60)
-        }
-        
+        if isMatchFinished() { checkMatchWinner() } else { prepareNextSet() }
         syncToFirestore()
         swapSides()
-        checkMatchWinner()
+    }
+    
+    func prepareNextSet() {
+        // If SINGLES, just rotate start server automatically (Toggle)
+        if !isDoubles {
+            let nextServer = config.homePlayers.contains(initialServerOfSet) ? (config.awayPlayers.first ?? "") : (config.homePlayers.first ?? "")
+            startNewSet(server: nextServer)
+            return
+        }
+        
+        // DOUBLES: Determine Team and Ask User
+        let wasHomeServingFirst = config.homePlayers.contains(initialServerOfSet)
+        let nextTeamIsHome = !wasHomeServingFirst
+        nextServingTeamName = nextTeamIsHome ? config.fixture.homeTeam : config.fixture.awayTeam
+        nextServingPlayers = nextTeamIsHome ? config.homePlayers : config.awayPlayers
+        showNextSetServerSelection = true
+    }
+    
+    func startNewSet(server: String) {
+        showNextSetServerSelection = false
+        serverName = server
+        initialServerOfSet = server
+        
+        // DOUBLES SMART RECEIVER LOGIC
+        if isDoubles {
+            // Determine Pairs from Set 1 (Alpha Pair vs Beta Pair)
+            let alphaServer = originalMatchServer
+            let alphaReceiver = originalMatchReceiver
+            
+            // If New Server is part of Alpha Pair, Receiver MUST be the other Alpha member
+            // Example: Set 1 was A -> X.
+            // Set 2: If X serves, A must receive. (X and A are Alpha Pair).
+            // Set 2: If Y serves, B must receive. (Y and B are Beta Pair).
+            
+            if server == alphaServer { receiverName = alphaReceiver }
+            else if server == alphaReceiver { receiverName = alphaServer }
+            else {
+                // Must be Beta Pair
+                // Identify the players who are NOT Alpha
+                let allPlayers = config.homePlayers + config.awayPlayers
+                let betaPair = allPlayers.filter { $0 != alphaServer && $0 != alphaReceiver }
+                // The receiver is the Beta member who isn't the server
+                if let r = betaPair.first(where: { $0 != server }) {
+                    receiverName = r
+                }
+            }
+        }
+        
+        initialReceiverOfSet = receiverName
+        startCountdown("BREAK", 60)
+        syncToFirestore()
     }
     
     func undoLastPoint() {
         guard let lastState = undoStack.popLast() else { return }
-        leftScore = lastState.leftScore
-        rightScore = lastState.rightScore
-        setHistory = lastState.setHistory
-        leftPlayers = lastState.leftPlayers
-        rightPlayers = lastState.rightPlayers
-        serverName = lastState.serverName
-        hasSwappedInDecider = lastState.hasSwappedInDecider
+        leftScore = lastState.leftScore; rightScore = lastState.rightScore; setHistory = lastState.setHistory
+        leftPlayers = lastState.leftPlayers; rightPlayers = lastState.rightPlayers
+        serverName = lastState.serverName; receiverName = lastState.receiverName
+        hasSwappedInDecider = lastState.hasSwappedInDecider; pointLog = lastState.pointLog
+        initialServerOfSet = lastState.initialServerOfSet; initialReceiverOfSet = lastState.initialReceiverOfSet
         showSetConfirmation = false
         syncToFirestore()
     }
     
     func saveSnapshot() {
-        let snap = PointSnapshot(leftScore: leftScore, rightScore: rightScore, setHistory: setHistory, leftPlayers: leftPlayers, rightPlayers: rightPlayers, serverName: serverName, hasSwappedInDecider: hasSwappedInDecider)
-        undoStack.append(snap)
+        undoStack.append(PointSnapshot(leftScore: leftScore, rightScore: rightScore, setHistory: setHistory, leftPlayers: leftPlayers, rightPlayers: rightPlayers, serverName: serverName, receiverName: receiverName, hasSwappedInDecider: hasSwappedInDecider, pointLog: pointLog, initialServerOfSet: initialServerOfSet, initialReceiverOfSet: initialReceiverOfSet))
     }
     
-    // UPDATED SYNC: Sends Timers + Durations
+    func calculateRichStats() -> [String: Any] {
+        var hS = 0; var hT = 0; var aS = 0; var aT = 0
+        for p in pointLog { if p.serverIsHome { hT+=1; if p.winnerIsHome{hS+=1} } else { aT+=1; if !p.winnerIsHome{aS+=1} } }
+        var mom = ""; if pointLog.count >= 6 { let l = pointLog.suffix(6); let w = l.filter{$0.winnerIsHome}.count; mom = "Home won \(w) of last 6" }
+        return ["serve_stats": ["home": ["won": hS, "total": hT], "away": ["won": aS, "total": aT]], "momentum": mom]
+    }
+    
     func syncToFirestore() {
-        let homeSc = leftIsHome ? leftScore : rightScore
-        let awaySc = leftIsHome ? rightScore : leftScore
-        let homeS = setsWon(byHome: true)
-        let awayS = setsWon(byHome: false)
-        
+        let homeS = setsWon(byHome: true); let awayS = setsWon(byHome: false)
+        let homeSc = leftIsHome ? leftScore : rightScore; let awaySc = leftIsHome ? rightScore : leftScore
         fsManager.updateLiveScore(
-            fixtureId: config.fixture.id,
-            homeScore: homeSc,
-            awayScore: awaySc,
-            homeSets: homeS,
-            awaySets: awayS,
-            server: serverName,
-            timerLabel: activeCountdownLabel,
-            timerValue: countdownSeconds,
-            totalTime: formatTime(totalSeconds),
-            activeTime: formatTime(activeSeconds)
+            fixtureId: config.fixture.id, homeScore: homeSc, awayScore: awaySc, homeSets: homeS, awaySets: awayS,
+            server: serverName, receiver: receiverName, timerLabel: activeCountdownLabel, timerValue: countdownSeconds,
+            totalTime: formatTime(totalSeconds), activeTime: formatTime(activeSeconds),
+            homePlayers: config.homePlayers, awayPlayers: config.awayPlayers,
+            leftPlayers: leftPlayers, rightPlayers: rightPlayers,
+            matchStatus: isPaused ? "Paused" : "Live", gameStats: calculateRichStats(),
+            setHistory: setHistory, lastSetServer: initialServerOfSet, lastSetReceiver: initialReceiverOfSet,
+            initialMatchServer: originalMatchServer, initialMatchReceiver: originalMatchReceiver
         )
     }
     
     func finishMatch() {
-        fsManager.uploadFinalScore(
-            fixture: config.fixture,
-            homePlayers: config.homePlayers,
-            awayPlayers: config.awayPlayers,
-            history: setHistory,
-            isTest: config.isTest,
-            totalTime: formatTime(totalSeconds),
-            activeTime: formatTime(activeSeconds)
-        )
+        fsManager.uploadFinalScore(fixture: config.fixture, homePlayers: config.homePlayers, awayPlayers: config.awayPlayers, history: setHistory, isTest: config.isTest, totalTime: formatTime(totalSeconds), activeTime: formatTime(activeSeconds))
         showCelebration = true
     }
     
     func isMatchFinished() -> Bool {
-        let homeWins = setsWon(byHome: true)
-        let awayWins = setsWon(byHome: false)
-        return homeWins >= setsNeededToWin || awayWins >= setsNeededToWin
+        let h = setsWon(byHome: true); let a = setsWon(byHome: false)
+        return h >= setsNeededToWin || a >= setsNeededToWin
     }
     
-    func checkMatchWinner() {
-        if isMatchFinished() { showHistorySummary = true }
-    }
-    
-    func checkDeciderSwap() {
-        let currentSetNumber = setHistory.count + 1
-        if currentSetNumber == currentBestOf {
-            if !hasSwappedInDecider && (leftScore == 5 || rightScore == 5) {
-                swapSides()
-                let temp = leftScore; leftScore = rightScore; rightScore = temp
-                hasSwappedInDecider = true; showChangeEndsAlert = true
-            }
-        }
-    }
+    func checkMatchWinner() { if isMatchFinished() { showHistorySummary = true } }
     
     func swapSides() { let temp = leftPlayers; leftPlayers = rightPlayers; rightPlayers = temp }
-    func rotateServer() { serverName = leftPlayers.contains(serverName) ? (rightPlayers.first ?? "") : (leftPlayers.first ?? "") }
 }
 
 struct TimerButton: View {
-    let title: String
-    let icon: String
-    let isActive: Bool
-    let remaining: Int
-    let action: () -> Void
-    
+    let title: String; let icon: String; let isActive: Bool; let remaining: Int; let action: () -> Void
     var body: some View {
         Button(action: action) {
-            HStack {
-                Image(systemName: icon)
-                Text(isActive ? "\(title.prefix { $0 != "(" }) (\(remaining))" : title)
-            }
-            .font(.caption.bold())
-            .padding(10)
-            .background(isActive ? Color.yellow : Color.gray.opacity(0.3))
-            .foregroundColor(isActive ? .black : .white)
-            .cornerRadius(8)
+            HStack { Image(systemName: icon); Text(isActive ? "\(title.prefix { $0 != "(" }) (\(remaining))" : title) }
+            .font(.caption.bold()).padding(10).background(isActive ? Color.yellow : Color.gray.opacity(0.3)).foregroundColor(isActive ? .black : .white).cornerRadius(8)
         }
     }
 }
 
-// ... Keep ScoreSideView, SummaryOverlay, CelebrationOverlay from before ...
-// I will re-include them briefly to ensure the file compiles fully if you copy-paste all.
-
+// ... ScoreSideView, SummaryOverlay, CelebrationOverlay (Unchanged)
 struct ScoreSideView: View {
     let names: [String]; let points: Int; let sets: Int; let color: Color
     let isServing: Bool; let label: String; let action: () -> Void
