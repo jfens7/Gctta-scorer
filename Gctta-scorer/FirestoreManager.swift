@@ -12,16 +12,17 @@ struct Player: Identifiable, Codable, Hashable {
 }
 
 struct Fixture: Identifiable, Codable, Hashable {
-    @DocumentID var id: String?
+    var id: String?
     var table: String
     var date: String
     var homeTeam: String
     var awayTeam: String
     var division: String
     var matchStatus: String?
+    var week: String?
     
     enum CodingKeys: String, CodingKey {
-        case id, table, date, division
+        case id, table, date, division, week
         case homeTeam = "home_team"
         case awayTeam = "away_team"
         case matchStatus = "match_status"
@@ -29,38 +30,23 @@ struct Fixture: Identifiable, Codable, Hashable {
 }
 
 struct SavedMatchState {
-    let homeScore: Int
-    let awayScore: Int
-    let setHistory: [SetRecord]
-    let leftPlayers: [String]
-    let rightPlayers: [String]
-    let server: String
-    let receiver: String
-    let totalTime: Int
-    let activeTime: Int
-    let lastSetServer: String
-    let lastSetReceiver: String
-    let initialMatchServer: String
-    let initialMatchReceiver: String
+    let homeScore: Int; let awayScore: Int; let setHistory: [SetRecord]
+    let leftPlayers: [String]; let rightPlayers: [String]
+    let server: String; let receiver: String; let totalTime: Int; let activeTime: Int
+    let lastSetServer: String; let lastSetReceiver: String
+    let initialMatchServer: String; let initialMatchReceiver: String
 }
 
 struct ScoreboardConfig: Hashable, Codable {
     let fixture: Fixture
-    let homePlayers: [String]
-    let awayPlayers: [String]
-    let initialServerName: String
-    let initialReceiverName: String
-    let serverIsOnLeft: Bool
-    let bestOf: Int
-    let isTest: Bool
+    let homePlayers: [String]; let awayPlayers: [String]
+    let initialServerName: String; let initialReceiverName: String
+    let serverIsOnLeft: Bool; let bestOf: Int; let isTest: Bool
     var isResume: Bool = false
 }
 
 struct SetRecord: Identifiable, Hashable, Codable {
-    var id = UUID()
-    let setNumber: Int
-    var homeScore: Int
-    var awayScore: Int
+    var id = UUID(); let setNumber: Int; var homeScore: Int; var awayScore: Int
 }
 
 // MARK: - MANAGER CLASS
@@ -68,6 +54,8 @@ struct SetRecord: Identifiable, Hashable, Codable {
 @MainActor
 class FirestoreManager: ObservableObject {
     @Published var liveFixtures: [Fixture] = []
+    @Published var consoleOutput: String = "--- iPad Diagnostics Started ---\n"
+    
     private let db = Firestore.firestore()
     private var listener: ListenerRegistration?
     
@@ -79,45 +67,70 @@ class FirestoreManager: ObservableObject {
         listener?.remove()
     }
     
-    // MARK: - LISTENER (DEBUG VERSION)
+    func log(_ msg: String) {
+        print(msg)
+        self.consoleOutput += msg + "\n"
+    }
+    
+    // MARK: - LISTENER (Date Filter Re-Enabled)
     func listenToTodayFixtures() {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "dd/MM/yyyy"
         let today = formatter.string(from: Date())
         
-        print("🔎 DEBUG: iPad searching for matches with date: [\(today)] in 'fixture_schedule'")
+        log("🚀 INITIALIZING CONNECTION...")
+        log("📅 Searching Firebase for date: [\(today)]")
+        log("📂 Target Collection: 'fixture_schedule'")
         
         listener = db.collection("fixture_schedule")
-            .whereField("date", isEqualTo: today)
+            .whereField("date", isEqualTo: today) // DATE FILTER RE-ADDED HERE
             .addSnapshotListener { [weak self] snapshot, error in
+                guard let self = self else { return }
+                
                 if let error = error {
-                    print("❌ DEBUG: Firestore Error: \(error.localizedDescription)")
+                    self.log("❌ FIREBASE ERROR: \(error.localizedDescription)")
                     return
                 }
                 
                 guard let documents = snapshot?.documents else {
-                    print("⚠️ DEBUG: No documents found in 'fixture_schedule' for today.")
+                    self.log("⚠️ No internet connection or completely empty response.")
                     return
                 }
                 
-                print("✅ DEBUG: Found \(documents.count) documents. Attempting decode...")
+                self.log("✅ Found \(documents.count) raw documents in database matching today's date.")
                 
-                self?.liveFixtures = documents.compactMap { doc in
-                    do {
-                        let fixture = try doc.data(as: Fixture.self)
-                        print("   -> Loaded: \(fixture.homeTeam) vs \(fixture.awayTeam) (Table \(fixture.table))")
-                        return fixture
-                    } catch {
-                        print("❌ DEBUG: Failed to decode match [\(doc.documentID)]: \(error)")
-                        return nil
-                    }
+                self.liveFixtures = documents.compactMap { doc in
+                    let data = doc.data()
+                    
+                    let tableVal: String
+                    if let tInt = data["table"] as? Int { tableVal = String(tInt) }
+                    else if let tStr = data["table"] as? String { tableVal = tStr }
+                    else { tableVal = "?" }
+                    
+                    // Handle Week whether it's an Int or String
+                    let weekVal: String?
+                    if let wInt = data["week"] as? Int { weekVal = String(wInt) }
+                    else if let wStr = data["week"] as? String { weekVal = wStr }
+                    else { weekVal = nil }
+                    
+                    let fixture = Fixture(
+                        id: doc.documentID,
+                        table: tableVal,
+                        date: data["date"] as? String ?? "Unknown",
+                        homeTeam: data["home_team"] as? String ?? "Unknown",
+                        awayTeam: data["away_team"] as? String ?? "Unknown",
+                        division: data["division"] as? String ?? "Unknown",
+                        matchStatus: data["match_status"] as? String,
+                        week: weekVal
+                    )
+                    return fixture
                 }
                 .sorted { $0.table.localizedStandardCompare($1.table) == .orderedAscending }
             }
     }
     
-    // MARK: - RESUME LOGIC
+    // MARK: - RESUME & RESOLUTION LOGIC
     func fetchSavedState(fixtureId: String) async -> SavedMatchState? {
         do {
             let doc = try await db.collection("fixture_schedule").document(fixtureId).getDocument()
@@ -129,6 +142,9 @@ class FirestoreManager: ObservableObject {
                 history = (try? JSONDecoder().decode([SetRecord].self, from: jsonData)) ?? []
             }
             
+            let tStr = data["total_duration"] as? String ?? "00:00"
+            let aStr = data["play_duration"] as? String ?? "00:00"
+            
             return SavedMatchState(
                 homeScore: data["live_home_score"] as? Int ?? 0,
                 awayScore: data["live_away_score"] as? Int ?? 0,
@@ -137,14 +153,34 @@ class FirestoreManager: ObservableObject {
                 rightPlayers: data["right_players"] as? [String] ?? [],
                 server: data["current_server"] as? String ?? "",
                 receiver: data["current_receiver"] as? String ?? "",
-                totalTime: parseTime(data["total_duration"] as? String ?? "00:00"),
-                activeTime: parseTime(data["play_duration"] as? String ?? "00:00"),
+                totalTime: parseTime(tStr),
+                activeTime: parseTime(aStr),
                 lastSetServer: data["last_set_start_server"] as? String ?? "",
                 lastSetReceiver: data["last_set_start_receiver"] as? String ?? "",
                 initialMatchServer: data["initial_match_server"] as? String ?? "",
                 initialMatchReceiver: data["initial_match_receiver"] as? String ?? ""
             )
         } catch { return nil }
+    }
+    
+    func forceFinish(fixtureId: String) {
+        db.collection("fixture_schedule").document(fixtureId).updateData([
+            "match_status": "Finished"
+        ])
+    }
+    
+    func resetMatch(fixtureId: String) {
+        db.collection("fixture_schedule").document(fixtureId).updateData([
+            "match_status": "Scheduled",
+            "live_home_score": 0,
+            "live_away_score": 0,
+            "live_home_sets": 0,
+            "live_away_sets": 0,
+            "game_scores_history": "",
+            "current_server": "",
+            "current_receiver": "",
+            "timer_label": ""
+        ])
     }
     
     func flagMatchForReview(fixtureId: String) {
@@ -216,9 +252,7 @@ class FirestoreManager: ObservableObject {
     
     // MARK: - UPDATE LIVE
     func updateLiveScore(fixtureId: String?, homeScore: Int, awayScore: Int, homeSets: Int, awaySets: Int, server: String, receiver: String, timerLabel: String?, timerValue: Int, totalTime: String, activeTime: String, homePlayers: [String], awayPlayers: [String], leftPlayers: [String], rightPlayers: [String], matchStatus: String, gameStats: [String: Any], setHistory: [SetRecord], lastSetServer: String, lastSetReceiver: String, initialMatchServer: String, initialMatchReceiver: String, gameHistoryString: String) {
-        
         guard let fid = fixtureId else { return }
-        
         let historyJson = (try? JSONEncoder().encode(setHistory)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         
         var data: [String: Any] = [
@@ -236,16 +270,13 @@ class FirestoreManager: ObservableObject {
             "last_set_start_server": lastSetServer, "last_set_start_receiver": lastSetReceiver,
             "initial_match_server": initialMatchServer, "initial_match_receiver": initialMatchReceiver
         ]
-        
         for (key, value) in gameStats { data[key] = value }
-        
         db.collection("fixture_schedule").document(fid).updateData(data)
     }
     
     // MARK: - FINAL UPLOAD
     func uploadFinalScore(fixture: Fixture, homePlayers: [String], awayPlayers: [String], history: [SetRecord], isTest: Bool, totalTime: String, activeTime: String) {
         let gameHistoryString = history.map { "\($0.homeScore)-\($0.awayScore)" }.joined(separator: ", ")
-        
         let data: [String: Any] = [
             "fixture_id": fixture.id ?? "", "table": fixture.table,
             "division": fixture.division, "home_team": fixture.homeTeam, "away_team": fixture.awayTeam,
@@ -258,7 +289,6 @@ class FirestoreManager: ObservableObject {
         ]
         
         db.collection("match_results").addDocument(data: data)
-        
         if let fid = fixture.id {
             db.collection("fixture_schedule").document(fid).updateData([
                 "match_status": "Finished",

@@ -86,14 +86,44 @@ struct ScoreboardView: View {
         _originalMatchServer = State(initialValue: config.initialServerName)
         _originalMatchReceiver = State(initialValue: config.initialReceiverName)
     }
+    
+    // DYNAMIC PLAYER NAMES FOR TIMEOUT BUTTONS
+    var homeLabel: String {
+        let name = config.homePlayers.first ?? "Home"
+        return name.components(separatedBy: " ").last?.uppercased() ?? "HOME"
+    }
+    
+    var awayLabel: String {
+        let name = config.awayPlayers.first ?? "Away"
+        return name.components(separatedBy: " ").last?.uppercased() ?? "AWAY"
+    }
 
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
                 // HEADER
                 HStack {
-                    Text("Table \(config.fixture.table) • Best of \(currentBestOf)").font(.headline.bold()).foregroundColor(.secondary)
+                    Text("Table \(config.fixture.table) • Best of \(currentBestOf)")
+                        .font(.headline.bold())
+                        .foregroundColor(.secondary)
+                    
+                    // --- GENERAL UNDO BUTTON ---
+                    Button(action: undoLastPoint) {
+                        HStack {
+                            Image(systemName: "arrow.uturn.backward")
+                            Text("UNDO")
+                        }
+                        .font(.subheadline.bold())
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(undoStack.isEmpty ? Color.gray.opacity(0.3) : Color.red.opacity(0.8))
+                        .foregroundColor(undoStack.isEmpty ? .gray : .white)
+                        .cornerRadius(6)
+                    }
+                    .disabled(undoStack.isEmpty)
+                    .padding(.leading, 15)
+                    
                     Spacer()
+                    
                     // TIMERS
                     HStack(spacing: 20) {
                         VStack(alignment: .trailing) {
@@ -116,8 +146,8 @@ struct ScoreboardView: View {
                 
                 // TIMEOUTS
                 HStack(spacing: 15) {
-                    TimerButton(title: "HOME T/O", icon: "hand.raised.fill", isActive: activeCountdownLabel == "HOME T/O", remaining: countdownSeconds) { startCountdown("HOME T/O", 60) }
-                    TimerButton(title: "AWAY T/O", icon: "hand.raised.fill", isActive: activeCountdownLabel == "AWAY T/O", remaining: countdownSeconds) { startCountdown("AWAY T/O", 60) }
+                    TimerButton(title: "\(homeLabel) T/O", icon: "hand.raised.fill", isActive: activeCountdownLabel == "\(homeLabel) T/O", remaining: countdownSeconds) { startCountdown("\(homeLabel) T/O", 60) }
+                    TimerButton(title: "\(awayLabel) T/O", icon: "hand.raised.fill", isActive: activeCountdownLabel == "\(awayLabel) T/O", remaining: countdownSeconds) { startCountdown("\(awayLabel) T/O", 60) }
                 }
                 .padding(10).background(Color.black.opacity(0.8))
 
@@ -152,8 +182,41 @@ struct ScoreboardView: View {
                     Color.black.opacity(0.6).ignoresSafeArea()
                     VStack(spacing: 20) {
                         Text(isPaused ? "MATCH PAUSED" : "\(activeCountdownLabel ?? "BREAK")").font(.largeTitle.bold()).foregroundColor(.white)
-                        if let label = activeCountdownLabel { Text("\(countdownSeconds)s").font(.system(size: 80, weight: .black)).foregroundColor(.yellow) }
+                        if activeCountdownLabel != nil { Text("\(countdownSeconds)s").font(.system(size: 80, weight: .black)).foregroundColor(.yellow) }
                         Button(action: { stopCountdown(); isPaused = false }) { Text("TAP TO RESUME").font(.title2.bold()).padding(20).background(Color.green).foregroundColor(.white).cornerRadius(15) }
+                    }
+                }
+            }
+            
+            // CHANGE ENDS (DECIDER) ALERT
+            if showChangeEndsAlert {
+                ZStack {
+                    Color.black.opacity(0.95).ignoresSafeArea()
+                    VStack(spacing: 30) {
+                        Image(systemName: "arrow.left.and.right.circle.fill")
+                            .font(.system(size: 80))
+                            .foregroundColor(.yellow)
+                        Text("DECIDING SET: CHANGE ENDS")
+                            .font(.largeTitle.bold())
+                            .foregroundColor(.white)
+                            .tracking(2)
+                        Text("Players must now switch sides of the table.")
+                            .font(.title2)
+                            .foregroundColor(.gray)
+                        
+                        Button(action: {
+                            showChangeEndsAlert = false
+                            syncToFirestore()
+                        }) {
+                            Text("CONFIRM SWAP")
+                                .font(.title.bold())
+                                .padding(.horizontal, 40)
+                                .padding(.vertical, 20)
+                                .background(Color.green)
+                                .foregroundColor(.white)
+                                .cornerRadius(15)
+                                .shadow(radius: 10)
+                        }
                     }
                 }
             }
@@ -203,17 +266,13 @@ struct ScoreboardView: View {
             
             if showCelebration {
                 CelebrationOverlay(winner: "Winner") {
-                    // NAVIGATION FIX: Go back to Setup, NOT Root
                     if !path.isEmpty { path.removeLast() }
-                    
-                    // Clear save ONLY when match is finished
                     UserDefaults.standard.removeObject(forKey: "savedScoreboardConfig")
                 }
             }
         }
         .navigationBarBackButtonHidden(true)
         .onAppear {
-            // SAVE CONFIG ON LOAD (FOR RESUME)
             if let encoded = try? JSONEncoder().encode(config) {
                 UserDefaults.standard.set(encoded, forKey: "savedScoreboardConfig")
             }
@@ -224,10 +283,9 @@ struct ScoreboardView: View {
         .onDisappear { stopMasterClock() }
         .alert("Exit Match?", isPresented: $showExitAlert) {
             Button("Cancel", role: .cancel) { }
-            // EXIT LOGIC: Save to Cloud, Pop to Root, BUT keep UserDefaults so we can resume
             Button("Save & Exit", role: .destructive) {
                 syncToFirestore()
-                path = NavigationPath() // Go to Home
+                path = NavigationPath()
             }
         } message: { Text("Your match will be saved so you can resume later.") }
     }
@@ -267,6 +325,7 @@ struct ScoreboardView: View {
             if activeCountdownLabel != nil || totalSeconds % 5 == 0 { syncToFirestore(isHeartbeat: true) }
         }
     }
+    
     func stopMasterClock() { timer?.invalidate(); timer = nil }
     func startCountdown(_ label: String, _ duration: Int) { activeCountdownLabel = label; countdownSeconds = duration; syncToFirestore() }
     func stopCountdown() { activeCountdownLabel = nil; countdownSeconds = 0; syncToFirestore() }
@@ -274,7 +333,7 @@ struct ScoreboardView: View {
 
     var leftIsHome: Bool { leftPlayers == config.homePlayers }
     var setsNeededToWin: Int { Int(ceil(Double(currentBestOf) / 2.0)) }
-    var isTimerLocked: Bool { activeCountdownLabel != nil || isPaused }
+    var isTimerLocked: Bool { activeCountdownLabel != nil || isPaused || showChangeEndsAlert || showSetConfirmation }
     func setsWon(byHome: Bool) -> Int { byHome ? setHistory.filter { $0.homeScore > $0.awayScore }.count : setHistory.filter { $0.awayScore > $0.homeScore }.count }
     func sideLabel(isLeft: Bool) -> String {
         let wallSide = VenueMapper.wallSide(for: config.fixture.table)
@@ -323,8 +382,10 @@ struct ScoreboardView: View {
         let currentSetNumber = setHistory.count + 1
         if currentSetNumber == currentBestOf {
             if !hasSwappedInDecider && (leftScore == 5 || rightScore == 5) {
-                swapSides(); let temp = leftScore; leftScore = rightScore; rightScore = temp
-                hasSwappedInDecider = true; showChangeEndsAlert = true
+                swapSides()
+                let temp = leftScore; leftScore = rightScore; rightScore = temp
+                hasSwappedInDecider = true
+                showChangeEndsAlert = true
                 if isDoubles {
                     let aX = config.awayPlayers[0]; let aY = config.awayPlayers[1]
                     let hA = config.homePlayers[0]; let hB = config.homePlayers[1]
@@ -391,6 +452,7 @@ struct ScoreboardView: View {
         hasSwappedInDecider = lastState.hasSwappedInDecider; pointLog = lastState.pointLog
         initialServerOfSet = lastState.initialServerOfSet; initialReceiverOfSet = lastState.initialReceiverOfSet
         showSetConfirmation = false
+        showChangeEndsAlert = false
         syncToFirestore(isHeartbeat: false)
     }
     
@@ -398,10 +460,39 @@ struct ScoreboardView: View {
         undoStack.append(PointSnapshot(leftScore: leftScore, rightScore: rightScore, setHistory: setHistory, leftPlayers: leftPlayers, rightPlayers: rightPlayers, serverName: serverName, receiverName: receiverName, hasSwappedInDecider: hasSwappedInDecider, pointLog: pointLog, initialServerOfSet: initialServerOfSet, initialReceiverOfSet: initialReceiverOfSet))
     }
     
+    // EXPLICIT FIRST NAMES (UP TO 8 POINTS) IN MOMENTUM CALCULATION
     func calculateRichStats() -> [String: Any] {
         var hS = 0; var hT = 0; var aS = 0; var aT = 0
-        for p in pointLog { if p.serverIsHome { hT+=1; if p.winnerIsHome{hS+=1} } else { aT+=1; if !p.winnerIsHome{aS+=1} } }
-        var mom = ""; if pointLog.count >= 6 { let l = pointLog.suffix(6); let w = l.filter{$0.winnerIsHome}.count; mom = "Home won \(w) of last 6" }
+        for p in pointLog {
+            if p.serverIsHome { hT += 1; if p.winnerIsHome { hS += 1 } }
+            else { aT += 1; if !p.winnerIsHome { aS += 1 } }
+        }
+        
+        var mom = ""
+        let momCount = min(pointLog.count, 8)
+        if momCount >= 6 {
+            let l = pointLog.suffix(momCount)
+            let homeWins = l.filter { $0.winnerIsHome }.count
+            let awayWins = momCount - homeWins
+            
+            // Extract First Name for Singles, Last Names for Doubles
+            let hName: String
+            if config.homePlayers.count == 1 { hName = config.homePlayers[0].components(separatedBy: " ").first ?? "Home" }
+            else { hName = config.homePlayers.map { $0.components(separatedBy: " ").last ?? "" }.joined(separator: "/") }
+            
+            let aName: String
+            if config.awayPlayers.count == 1 { aName = config.awayPlayers[0].components(separatedBy: " ").first ?? "Away" }
+            else { aName = config.awayPlayers.map { $0.components(separatedBy: " ").last ?? "" }.joined(separator: "/") }
+            
+            if homeWins >= Int(Double(momCount) * 0.7) {
+                mom = "\(hName) won \(homeWins) of the last \(momCount) points"
+            } else if awayWins >= Int(Double(momCount) * 0.7) {
+                mom = "\(aName) won \(awayWins) of the last \(momCount) points"
+            } else {
+                mom = "Evenly matched"
+            }
+        }
+        
         return ["serve_stats": ["home": ["won": hS, "total": hT], "away": ["won": aS, "total": aT]], "momentum": mom]
     }
     
@@ -409,7 +500,6 @@ struct ScoreboardView: View {
         let homeS = setsWon(byHome: true); let awayS = setsWon(byHome: false)
         let homeSc = leftIsHome ? leftScore : rightScore; let awaySc = leftIsHome ? rightScore : leftScore
         
-        // FIX: FORCE LIVE STRING UPDATE
         let historyString = setHistory.map { "\($0.homeScore)-\($0.awayScore)" }.joined(separator: ", ")
         
         let stats = calculateRichStats()
@@ -423,7 +513,7 @@ struct ScoreboardView: View {
             matchStatus: isPaused ? "Paused" : "Live", gameStats: stats,
             setHistory: setHistory, lastSetServer: initialServerOfSet, lastSetReceiver: initialReceiverOfSet,
             initialMatchServer: originalMatchServer, initialMatchReceiver: originalMatchReceiver,
-            gameHistoryString: historyString // <--- SENT LIVE HERE
+            gameHistoryString: historyString
         )
         
         if !isHeartbeat {

@@ -24,23 +24,30 @@ struct TableTennisKioskApp: App {
         WindowGroup {
             NavigationStack(path: $path) {
                 VStack {
-                    // --- 1. RESUME BUTTON (New) ---
-                    if hasSavedMatch {
+                    // --- 1. RESUME BUTTON ---
+                    if hasSavedMatch, let config = savedConfig {
                         Button(action: { showResumeAlert = true }) {
-                            HStack {
-                                Image(systemName: "arrow.counterclockwise.circle.fill")
-                                    .font(.title2)
-                                VStack(alignment: .leading) {
-                                    Text("UNSAVED MATCH FOUND")
-                                        .font(.headline)
-                                    Text("Tap to resume where you left off")
+                            HStack(spacing: 15) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .font(.system(size: 30))
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("UNSAVED MATCH: TABLE \(config.fixture.table)")
+                                        .font(.caption).bold()
+                                        .foregroundColor(.yellow)
+                                    
+                                    Text("\(config.fixture.homeTeam) vs \(config.fixture.awayTeam)")
+                                        .font(.headline).bold()
+                                    
+                                    let weekText = config.fixture.week != nil ? " • Week \(config.fixture.week!)" : ""
+                                    Text("\(config.fixture.division)\(weekText)")
                                         .font(.caption)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.right")
                             }
                             .padding()
-                            .background(Color.orange)
+                            .background(Color.orange.opacity(0.9))
                             .foregroundColor(.white)
                             .cornerRadius(12)
                         }
@@ -51,11 +58,11 @@ struct TableTennisKioskApp: App {
                     // --- 2. FIXTURE LIST ---
                     if fsManager.liveFixtures.isEmpty {
                         VStack(spacing: 20) {
-                            Spacer()
-                            Image(systemName: "wifi.exclamationmark").font(.system(size: 60)).foregroundColor(.gray)
-                            Text("No Fixtures Found for Today").font(.title).foregroundColor(.secondary)
-                            Text("Ensure the iPad date matches the Fixture date in Firebase.").font(.caption)
-                            Spacer()
+                            Image(systemName: "ladybug.fill").font(.system(size: 50)).foregroundColor(.orange)
+                            Text("DIAGNOSTICS MODE").font(.title.bold()).foregroundColor(.white)
+                            ScrollView {
+                                Text(fsManager.consoleOutput).font(.system(.caption, design: .monospaced)).foregroundColor(.green).frame(maxWidth: .infinity, alignment: .leading).padding()
+                            }.background(Color.black).cornerRadius(10).padding()
                         }
                     } else {
                         List(fsManager.liveFixtures) { fixture in
@@ -79,16 +86,18 @@ struct TableTennisKioskApp: App {
                 .navigationDestination(for: ScoreboardConfig.self) { config in
                     ScoreboardView(config: config, path: $path)
                 }
-                // Check for match every time we return to this screen
                 .onAppear { checkForSavedMatch() }
             }
             .preferredColorScheme(.dark)
-            .alert("Unsaved Match Found", isPresented: $showResumeAlert) {
-                Button("Continue Match", role: .none) { resumeSavedMatch() }
-                Button("Discard & Send for Review", role: .destructive) { discardSavedMatch() }
+            // THE NEW EXIT/RESOLUTION OPTIONS
+            .alert("Unsaved Match in Progress", isPresented: $showResumeAlert) {
+                Button("Resume Match") { resumeSavedMatch() }
+                Button("Match Complete (Force Finish)", role: .none) { forceFinishSavedMatch() }
+                Button("Started in Error (Reset Database)", role: .destructive) { resetMatchInError() }
+                Button("Just Delete Local Save", role: .destructive) { deleteLocalSaveOnly() }
                 Button("Cancel", role: .cancel) { }
             } message: {
-                Text("Do you want to pick up where you left off?")
+                Text("How would you like to handle the suspended match?")
             }
         }
     }
@@ -106,14 +115,26 @@ struct TableTennisKioskApp: App {
     func resumeSavedMatch() {
         guard var config = savedConfig else { return }
         config.isResume = true
-        // Important: Append to path to navigate
         path.append(config)
     }
     
-    func discardSavedMatch() {
+    func forceFinishSavedMatch() {
         if let fid = savedConfig?.fixture.id {
-            fsManager.flagMatchForReview(fixtureId: fid)
+            fsManager.forceFinish(fixtureId: fid)
         }
+        UserDefaults.standard.removeObject(forKey: "savedScoreboardConfig")
+        self.hasSavedMatch = false
+    }
+    
+    func resetMatchInError() {
+        if let fid = savedConfig?.fixture.id {
+            fsManager.resetMatch(fixtureId: fid)
+        }
+        UserDefaults.standard.removeObject(forKey: "savedScoreboardConfig")
+        self.hasSavedMatch = false
+    }
+    
+    func deleteLocalSaveOnly() {
         UserDefaults.standard.removeObject(forKey: "savedScoreboardConfig")
         self.hasSavedMatch = false
     }
