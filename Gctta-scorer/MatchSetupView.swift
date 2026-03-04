@@ -1,5 +1,12 @@
 import SwiftUI
 
+struct FixtureMatch: Identifiable, Equatable {
+    let id = UUID()
+    let homeLetters: [String]
+    let awayLetters: [String]
+    let isDoubles: Bool
+}
+
 struct MatchSetupView: View {
     @ObservedObject var fsManager: FirestoreManager
     let fixture: Fixture
@@ -7,172 +14,339 @@ struct MatchSetupView: View {
     
     @State private var homeRoster: [String] = []
     @State private var awayRoster: [String] = []
-    @State private var selectedHome: Set<String> = []
-    @State private var selectedAway: Set<String> = []
     
     @State private var playedPairs: Set<String> = []
+    @State private var fixtureStats = FixtureStats()
     @State private var showingErrorAlert = false
     @State private var errorMessage = ""
     
-    @State private var matchType: MatchType = .singles
-    @State private var selectedBestOf: Int = 5
+    // Sequence State
+    @State private var matchSequence: [FixtureMatch] = []
+    @State private var isReordering = false
     
+    // Toss State
     @State private var showingToss = false
+    @State private var activeMatchToStart: FixtureMatch?
+    @State private var activeHomePlayers: [String] = []
+    @State private var activeAwayPlayers: [String] = []
+    @State private var selectedBestOf: Int = 5
     @State private var selectedInitialServer = ""
     @State private var selectedInitialReceiver = ""
     @State private var serverStartsOnWall = true
     @State private var isTestMatch = false
     
+    // Search State
     @State private var showingSearchSheet = false
     @State private var activeSearchTeamIsHome = true
     
-    enum MatchType: String, CaseIterable { case singles = "Singles", doubles = "Doubles" }
+    @State private var refreshTrigger = false
+
+    var isDiv1: Bool {
+        fixture.division.lowercased().contains("div 1") || fixture.division.lowercased().contains("premier")
+    }
 
     var body: some View {
-        VStack(spacing: 20) {
-            Text("Table \(fixture.table) Setup").font(.system(size: 40, weight: .black))
+        VStack(spacing: 15) {
             
-            HStack(spacing: 20) {
-                Picker("Type", selection: $matchType) {
-                    ForEach(MatchType.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented).frame(width: 250)
-                .onChange(of: matchType) { _, _ in
-                    selectedHome.removeAll(); selectedAway.removeAll()
-                    autoSelectBestOf()
+            // --- LIVE NIGHT SCOREBOARD ---
+            HStack(alignment: .center) {
+                VStack(alignment: .leading) {
+                    Text(fixture.homeTeam.uppercased()).font(.title2.bold()).foregroundColor(.blue)
+                    Text("SCORE: \(fixtureStats.homeTeamScore)").font(.headline).foregroundColor(.white)
                 }
                 
-                Picker("Format", selection: $selectedBestOf) {
-                    Text("Best of 3").tag(3)
-                    Text("Best of 5").tag(5)
-                    Text("Best of 7").tag(7)
+                Spacer()
+                
+                VStack(alignment: .center) {
+                    Text("TABLE \(fixture.table)").font(.system(size: 35, weight: .black))
+                    Text("MATCH SETUP").font(.caption).foregroundColor(.gray).tracking(2)
                 }
-                .pickerStyle(.segmented).frame(width: 300)
+                
+                Spacer()
+                
+                VStack(alignment: .trailing) {
+                    Text(fixture.awayTeam.uppercased()).font(.title2.bold()).foregroundColor(.red)
+                    Text("SCORE: \(fixtureStats.awayTeamScore)").font(.headline).foregroundColor(.white)
+                }
             }
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
 
-            Text("Select \(slotsNeeded) Player\(slotsNeeded > 1 ? "s" : "") per Team").font(.headline).foregroundStyle(.secondary)
-
+            // --- ROSTER RANKING SYSTEM ---
             HStack(alignment: .top, spacing: 0) {
                 TeamSelectionColumn(
                     teamName: fixture.homeTeam,
-                    roster: homeRoster,
-                    selected: $selectedHome,
-                    limit: slotsNeeded,
-                    disabledPlayers: getDisabledPlayers(forHome: true),
-                    color: .blue
-                ) {
-                    activeSearchTeamIsHome = true; showingSearchSheet = true
-                }
+                    roster: $homeRoster,
+                    isHome: true,
+                    color: .blue,
+                    playerStats: fixtureStats.playerStats,
+                    getLetter: getLetter,
+                    onMoveUp: { movePlayerUp(name: $0, isHome: true) },
+                    onMoveDown: { movePlayerDown(name: $0, isHome: true) },
+                    onAdd: { activeSearchTeamIsHome = true; showingSearchSheet = true }
+                )
                 .frame(maxWidth: .infinity)
                 
-                Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1).padding(.horizontal, 20)
+                Rectangle().fill(Color.gray.opacity(0.3)).frame(width: 1).padding(.horizontal, 15)
                 
                 TeamSelectionColumn(
                     teamName: fixture.awayTeam,
-                    roster: awayRoster,
-                    selected: $selectedAway,
-                    limit: slotsNeeded,
-                    disabledPlayers: getDisabledPlayers(forHome: false),
-                    color: .red
-                ) {
-                    activeSearchTeamIsHome = false; showingSearchSheet = true
-                }
+                    roster: $awayRoster,
+                    isHome: false,
+                    color: .red,
+                    playerStats: fixtureStats.playerStats,
+                    getLetter: getLetter,
+                    onMoveUp: { movePlayerUp(name: $0, isHome: false) },
+                    onMoveDown: { movePlayerDown(name: $0, isHome: false) },
+                    onAdd: { activeSearchTeamIsHome = false; showingSearchSheet = true }
+                )
                 .frame(maxWidth: .infinity)
             }
-            .padding()
+            .padding(.horizontal)
+            .frame(height: 250)
+            .id(refreshTrigger)
             
-            Button(action: validateAndProceed) {
-                Text("PROCEED TO TOSS").font(.title2.bold()).frame(width: 350, height: 70)
-                    .background(canProceed ? Color.green : Color.gray.opacity(0.3)).foregroundColor(.white).cornerRadius(15)
+            Divider().padding(.vertical, 5)
+            
+            // --- MATCH SEQUENCE HEADER ---
+            HStack {
+                VStack(alignment: .leading) {
+                    Text("NIGHT'S FIXTURE")
+                        .font(.title2.bold())
+                        .foregroundColor(.secondary)
+                        .tracking(2)
+                    Text("Letters are automatically mapped to the Player's Rank (1, 2, or 3). Use arrows to adjust.")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+                
+                Spacer()
+                
+                Button(action: { isReordering.toggle() }) {
+                    HStack {
+                        Image(systemName: isReordering ? "checkmark.circle.fill" : "arrow.up.arrow.down")
+                        Text(isReordering ? "DONE" : "REORDER SEQUENCE")
+                    }
+                    .font(.caption.bold())
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(isReordering ? Color.green : Color.orange.opacity(0.8))
+                    .foregroundColor(.white)
+                    .cornerRadius(8)
+                }
             }
-            .disabled(!canProceed)
+            .padding(.horizontal)
+            
+            // --- AUTOMATED MATCH LIST ---
+            List {
+                ForEach(matchSequence) { match in
+                    let index = matchSequence.firstIndex(of: match) ?? 0
+                    let hNames = match.homeLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: true) }
+                    let aNames = match.awayLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: false) }
+                    let canStart = hNames.count == match.homeLetters.count && aNames.count == match.awayLetters.count
+                    
+                    HStack {
+                        Text("\(index + 1).")
+                            .font(.title3.bold())
+                            .frame(width: 35, alignment: .leading)
+                            .foregroundColor(.gray)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(match.isDoubles ? "DOUBLES" : "SINGLES")
+                                .font(.caption.bold())
+                                .foregroundColor(match.isDoubles ? .purple : .blue)
+                                .tracking(1)
+                            
+                            HStack {
+                                Text("\(hNames.joined(separator: " & "))")
+                                    .font(.headline.bold())
+                                    .foregroundColor(hNames.isEmpty ? .gray : .white)
+                                Text("(\(match.homeLetters.joined(separator: "&")))")
+                                    .font(.caption).foregroundColor(.blue)
+                                
+                                Text(" vs ").foregroundColor(.gray).font(.caption.bold())
+                                
+                                Text("\(aNames.joined(separator: " & "))")
+                                    .font(.headline.bold())
+                                    .foregroundColor(aNames.isEmpty ? .gray : .white)
+                                Text("(\(match.awayLetters.joined(separator: "&")))")
+                                    .font(.caption).foregroundColor(.red)
+                            }
+                        }
+                        Spacer()
+                        
+                        if !isReordering {
+                            if canStart {
+                                Image(systemName: "play.circle.fill")
+                                    .font(.system(size: 35))
+                                    .foregroundColor(.green)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        startMatch(match: match, hNames: hNames, aNames: aNames)
+                                    }
+                            } else {
+                                Text("Assign Players")
+                                    .font(.caption.bold())
+                                    .foregroundColor(.orange)
+                            }
+                        } else {
+                            Image(systemName: "line.3.horizontal")
+                                .foregroundColor(.gray)
+                                .font(.title2)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .background(Color.black.opacity(0.3))
+                    .cornerRadius(12)
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
+                }
+                .onMove { from, to in
+                    matchSequence.move(fromOffsets: from, toOffset: to)
+                }
+            }
+            .listStyle(.plain)
+            .environment(\.editMode, .constant(isReordering ? .active : .inactive))
         }
-        .padding()
         .onAppear {
             Task {
                 playedPairs = await fsManager.fetchPlayedPairs(fixture: fixture)
+                if let fid = fixture.id {
+                    fixtureStats = await fsManager.fetchFixtureStats(fixtureId: fid)
+                }
+                
                 if homeRoster.isEmpty {
                     let rosters = await fsManager.fetchMatchRosters(homeTeam: fixture.homeTeam, awayTeam: fixture.awayTeam)
                     homeRoster = rosters.home; awayRoster = rosters.away
-                    autoSelectBestOf()
+                }
+                if matchSequence.isEmpty {
+                    generateSequence()
                 }
             }
         }
-        .alert("Invalid Matchup", isPresented: $showingErrorAlert) {
+        .alert("Missing Players", isPresented: $showingErrorAlert) {
             Button("OK", role: .cancel) { }
-        } message: {
-            Text(errorMessage)
-        }
+        } message: { Text(errorMessage) }
+        
         .sheet(isPresented: $showingToss) {
-            TossView(
-                selectedHome: Array(selectedHome),
-                selectedAway: Array(selectedAway),
-                matchType: matchType,
-                isTestMatch: $isTestMatch,
-                serverStartsOnWall: $serverStartsOnWall,
-                selectedInitialServer: $selectedInitialServer,
-                selectedInitialReceiver: $selectedInitialReceiver,
-                onStart: { launchScoreboard() }
-            )
+            if let match = activeMatchToStart {
+                TossView(
+                    selectedHome: activeHomePlayers,
+                    selectedAway: activeAwayPlayers,
+                    isDoubles: match.isDoubles,
+                    selectedBestOf: $selectedBestOf,
+                    isTestMatch: $isTestMatch,
+                    serverStartsOnWall: $serverStartsOnWall,
+                    selectedInitialServer: $selectedInitialServer,
+                    selectedInitialReceiver: $selectedInitialReceiver,
+                    onStart: { launchScoreboard() }
+                )
+            }
         }
+        
         .sheet(isPresented: $showingSearchSheet) {
             PlayerSearchSheet(fsManager: fsManager) { player in
                 if activeSearchTeamIsHome {
                     if !homeRoster.contains(player.name) { homeRoster.append(player.name) }
-                    if matchType == .singles { selectedHome = [player.name] }
-                    else if selectedHome.count < slotsNeeded { selectedHome.insert(player.name) }
                 } else {
                     if !awayRoster.contains(player.name) { awayRoster.append(player.name) }
-                    if matchType == .singles { selectedAway = [player.name] }
-                    else if selectedAway.count < slotsNeeded { selectedAway.insert(player.name) }
                 }
+                refreshTrigger.toggle()
             }
+        }
+    }
+    
+    // MARK: - RANKING & LETTER LOGIC
+    func generateSequence() {
+        if isDiv1 {
+            matchSequence = [
+                FixtureMatch(homeLetters: ["A"], awayLetters: ["X"], isDoubles: false),
+                FixtureMatch(homeLetters: ["B"], awayLetters: ["Y"], isDoubles: false),
+                FixtureMatch(homeLetters: ["B"], awayLetters: ["X"], isDoubles: false),
+                FixtureMatch(homeLetters: ["A"], awayLetters: ["Y"], isDoubles: false),
+                FixtureMatch(homeLetters: ["A", "B"], awayLetters: ["X", "Y"], isDoubles: true)
+            ]
+        } else {
+            matchSequence = [
+                FixtureMatch(homeLetters: ["A"], awayLetters: ["X"], isDoubles: false), // 1
+                FixtureMatch(homeLetters: ["B"], awayLetters: ["Y"], isDoubles: false), // 2
+                FixtureMatch(homeLetters: ["C"], awayLetters: ["Z"], isDoubles: false), // 3
+                FixtureMatch(homeLetters: ["B", "C"], awayLetters: ["Z", "X"], isDoubles: true), // 4
+                FixtureMatch(homeLetters: ["B"], awayLetters: ["X"], isDoubles: false), // 5
+                FixtureMatch(homeLetters: ["A"], awayLetters: ["Z"], isDoubles: false), // 6
+                FixtureMatch(homeLetters: ["C"], awayLetters: ["Y"], isDoubles: false), // 7
+                FixtureMatch(homeLetters: ["B", "A"], awayLetters: ["Z", "Y"], isDoubles: true), // 8
+                FixtureMatch(homeLetters: ["B"], awayLetters: ["Z"], isDoubles: false), // 9
+                FixtureMatch(homeLetters: ["C"], awayLetters: ["X"], isDoubles: false), // 10
+                FixtureMatch(homeLetters: ["A"], awayLetters: ["Y"], isDoubles: false)  // 11
+            ]
         }
     }
 
-    var slotsNeeded: Int { matchType == .singles ? 1 : 2 }
-    var canProceed: Bool { selectedHome.count == slotsNeeded && selectedAway.count == slotsNeeded }
-    
-    // MARK: - Validation Logic
-    func validateAndProceed() {
-        if matchType == .singles {
-            if let homeP = selectedHome.first, let awayP = selectedAway.first {
-                let pairKey = "\(homeP) vs \(awayP)"
-                if playedPairs.contains(pairKey) {
-                    errorMessage = "\(homeP) and \(awayP) have already played. Please select a different matchup."
-                    showingErrorAlert = true
-                    return
-                }
-            }
+    func getPlayerWithLetter(letter: String, isHome: Bool) -> String? {
+        let roster = isHome ? homeRoster : awayRoster
+        for player in roster {
+            if getLetter(for: player, isHome: isHome) == letter { return player }
         }
-        selectedInitialServer = Array(selectedHome).first ?? ""
-        selectedInitialReceiver = Array(selectedAway).first ?? ""
-        showingToss = true
+        return nil
     }
-    
-    func getDisabledPlayers(forHome: Bool) -> Set<String> {
-        guard matchType == .singles else { return [] }
-        var disabled = Set<String>()
-        if forHome {
-            if let opponent = selectedAway.first {
-                for player in homeRoster {
-                    if playedPairs.contains("\(player) vs \(opponent)") { disabled.insert(player) }
-                }
-            }
+
+    // MAPS RANK (INDEX) TO THE EXACT ASSIGNED LETTER
+    func getLetter(for name: String, isHome: Bool) -> String {
+        let roster = isHome ? homeRoster : awayRoster
+        let idx = roster.firstIndex(of: name) ?? 0
+        
+        if isDiv1 {
+            if isHome { return idx == 0 ? "A" : "B" }
+            else { return idx == 0 ? "Y" : "X" }
         } else {
-            if let opponent = selectedHome.first {
-                for player in awayRoster {
-                    if playedPairs.contains("\(player) vs \(opponent)") { disabled.insert(player) }
-                }
+            if isHome {
+                if idx == 0 { return "B" }
+                if idx == 1 { return "C" }
+                return "A"
+            } else {
+                if idx == 0 { return "Z" }
+                if idx == 1 { return "X" }
+                return "Y"
             }
         }
-        return disabled
     }
     
-    func autoSelectBestOf() {
-        let div = fixture.division.lowercased()
-        let isDiv1 = div.contains("div 1") || div.contains("premier")
-        selectedBestOf = isDiv1 ? (matchType == .singles ? 7 : 5) : (matchType == .singles ? 5 : 3)
+    // MOVEMENT CONTROLS FOR RANK RE-ORDERING
+    func movePlayerUp(name: String, isHome: Bool) {
+        var roster = isHome ? homeRoster : awayRoster
+        if let idx = roster.firstIndex(of: name), idx > 0 {
+            roster.swapAt(idx, idx - 1)
+            if isHome { homeRoster = roster } else { awayRoster = roster }
+            refreshTrigger.toggle()
+        }
+    }
+
+    func movePlayerDown(name: String, isHome: Bool) {
+        var roster = isHome ? homeRoster : awayRoster
+        if let idx = roster.firstIndex(of: name), idx < roster.count - 1 {
+            roster.swapAt(idx, idx + 1)
+            if isHome { homeRoster = roster } else { awayRoster = roster }
+            refreshTrigger.toggle()
+        }
+    }
+
+    func startMatch(match: FixtureMatch, hNames: [String], aNames: [String]) {
+        self.activeMatchToStart = match
+        self.activeHomePlayers = hNames
+        self.activeAwayPlayers = aNames
+        self.selectedInitialServer = hNames.first ?? ""
+        self.selectedInitialReceiver = aNames.first ?? ""
+        
+        if isDiv1 {
+            self.selectedBestOf = match.isDoubles ? 5 : 7
+        } else {
+            self.selectedBestOf = 5
+        }
+        self.showingToss = true
     }
     
     func launchScoreboard() {
@@ -181,85 +355,140 @@ struct MatchSetupView: View {
         
         let config = ScoreboardConfig(
             fixture: fixture,
-            homePlayers: Array(selectedHome),
-            awayPlayers: Array(selectedAway),
+            homePlayers: activeHomePlayers,
+            awayPlayers: activeAwayPlayers,
             initialServerName: selectedInitialServer,
             initialReceiverName: selectedInitialReceiver,
             serverIsOnLeft: serverIsOnLeft,
             bestOf: selectedBestOf,
             isTest: isTestMatch
         )
-        path.append(config)
+        
         showingToss = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { path.append(config) }
     }
 }
 
-// MARK: - HELPERS
+// MARK: - RANKING UI HELPER
 
 struct TeamSelectionColumn: View {
-    let teamName: String; let roster: [String]; @Binding var selected: Set<String>
-    let limit: Int; var disabledPlayers: Set<String>; let color: Color; let onAdd: () -> Void
-    var selectedArray: [String] { Array(selected).sorted() }
+    let teamName: String
+    @Binding var roster: [String]
+    let isHome: Bool
+    let color: Color
+    let playerStats: [String: PlayerNightStat]
+    let getLetter: (String, Bool) -> String
+    let onMoveUp: (String) -> Void
+    let onMoveDown: (String) -> Void
+    let onAdd: () -> Void
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            Text(teamName).font(.title2.bold()).foregroundColor(color)
-            HStack(spacing: 10) {
-                ForEach(0..<limit, id: \.self) { index in
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 10).fill(Color(uiColor: .secondarySystemBackground)).stroke(color, lineWidth: 2)
-                        if index < selectedArray.count { Text(selectedArray[index]).font(.headline) }
-                        else { Text("Select").font(.caption).foregroundStyle(.secondary) }
-                    }.frame(height: 50)
-                }
-            }.padding(.bottom, 10)
+        VStack(alignment: .leading, spacing: 10) {
             
             ScrollView {
-                VStack(spacing: 10) {
+                VStack(spacing: 8) {
                     ForEach(roster, id: \.self) { name in
-                        let isDisabled = disabledPlayers.contains(name)
-                        Button(action: { if !isDisabled { toggleSelection(name) } }) {
-                            HStack {
-                                Text(name).font(.headline)
-                                Spacer()
-                                if selected.contains(name) { Image(systemName: "checkmark.circle.fill") }
-                                if isDisabled { Text("Played").font(.caption).bold() }
+                        let idx = roster.firstIndex(of: name) ?? 0
+                        let stats = playerStats[name] ?? PlayerNightStat()
+                        
+                        HStack(spacing: 10) {
+                            
+                            // RANK IDENTIFIER & LETTER
+                            VStack(spacing: 2) {
+                                Text("RANK \(idx + 1)")
+                                    .font(.system(size: 8, weight: .black))
+                                    .foregroundColor(.gray)
+                                Text(getLetter(name, isHome))
+                                    .font(.system(size: 20, weight: .black))
+                                    .frame(width: 50, height: 40)
+                                    .background(color.opacity(0.2))
+                                    .foregroundColor(color)
+                                    .cornerRadius(8)
                             }
-                            .padding().frame(maxWidth: .infinity)
-                            .background(selected.contains(name) ? color : Color.gray.opacity(isDisabled ? 0.05 : 0.1))
-                            .foregroundColor(selected.contains(name) ? .white : (isDisabled ? .gray.opacity(0.4) : .primary))
-                            .cornerRadius(10).contentShape(Rectangle())
+                            
+                            // PLAYER NAME & STATS
+                            HStack {
+                                Text(name).font(.headline).lineLimit(1).minimumScaleFactor(0.8)
+                                
+                                if stats.played > 0 {
+                                    Text("\(stats.wins)W - \(stats.played)P")
+                                        .font(.caption2.bold())
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 3)
+                                        .background(Color.white.opacity(0.1))
+                                        .cornerRadius(4)
+                                        .foregroundColor(.gray)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10)
+                            .frame(maxWidth: .infinity, minHeight: 50)
+                            .background(Color.gray.opacity(0.1))
+                            .foregroundColor(.primary)
+                            .cornerRadius(10)
+                            
+                            // RANK REORDER ARROWS & DELETE
+                            VStack(spacing: 5) {
+                                HStack(spacing: 5) {
+                                    Button(action: { onMoveUp(name) }) {
+                                        Image(systemName: "chevron.up").font(.caption).padding(6).background(Color.white.opacity(0.1)).cornerRadius(5)
+                                    }.disabled(idx == 0)
+                                    
+                                    Button(action: { onMoveDown(name) }) {
+                                        Image(systemName: "chevron.down").font(.caption).padding(6).background(Color.white.opacity(0.1)).cornerRadius(5)
+                                    }.disabled(idx == roster.count - 1)
+                                }
+                                Button(action: { roster.removeAll { $0 == name } }) {
+                                    Image(systemName: "trash.fill").font(.caption).foregroundColor(.red).padding(6).frame(maxWidth: .infinity).background(Color.red.opacity(0.1)).cornerRadius(5)
+                                }
+                            }
                         }
-                        .disabled(isDisabled)
                     }
-                    Button(action: onAdd) { Label("Add / Search Player", systemImage: "person.badge.plus").frame(maxWidth: .infinity).padding().background(Color.gray.opacity(0.1)).foregroundColor(.primary).cornerRadius(10) }
+                    Button(action: onAdd) {
+                        Label("Add / Substitute Player", systemImage: "person.badge.plus")
+                            .frame(maxWidth: .infinity).padding().background(Color.gray.opacity(0.1)).foregroundColor(.primary).cornerRadius(10)
+                    }
                 }
             }
         }
     }
-    func toggleSelection(_ name: String) {
-        if limit == 1 { if selected.contains(name) { selected.remove(name) } else { selected = [name] } }
-        else { if selected.contains(name) { selected.remove(name) } else if selected.count < limit { selected.insert(name) } }
-    }
 }
 
 struct TossView: View {
-    let selectedHome: [String]; let selectedAway: [String]; let matchType: MatchSetupView.MatchType
-    @Binding var isTestMatch: Bool; @Binding var serverStartsOnWall: Bool
-    @Binding var selectedInitialServer: String; @Binding var selectedInitialReceiver: String
+    let selectedHome: [String]
+    let selectedAway: [String]
+    let isDoubles: Bool
+    @Binding var selectedBestOf: Int
+    @Binding var isTestMatch: Bool
+    @Binding var serverStartsOnWall: Bool
+    @Binding var selectedInitialServer: String
+    @Binding var selectedInitialReceiver: String
     let onStart: () -> Void
+    
     var body: some View {
         VStack(spacing: 25) {
             Text("Match Toss").font(.largeTitle.bold())
-            Toggle("Test Match (No Stats)", isOn: $isTestMatch).padding().background(Color.orange.opacity(0.1)).cornerRadius(8)
+            
+            HStack {
+                Picker("Format", selection: $selectedBestOf) {
+                    Text("Best of 3").tag(3)
+                    Text("Best of 5").tag(5)
+                    Text("Best of 7").tag(7)
+                }.pickerStyle(.segmented).frame(width: 300)
+                
+                Toggle("Test Match (No Stats)", isOn: $isTestMatch).padding(.horizontal).background(Color.orange.opacity(0.1)).cornerRadius(8)
+            }
+            
             VStack(alignment: .leading, spacing: 20) {
                 Text("1. Who is serving first?").font(.headline)
                 Picker("Server", selection: $selectedInitialServer) { ForEach(selectedHome + selectedAway, id: \.self) { Text($0).tag($0) } }.pickerStyle(.wheel).frame(height: 100)
-                if matchType == .doubles {
+                
+                if isDoubles {
                     Text("2. Who is receiving?").font(.headline)
                     let validReceivers = selectedHome.contains(selectedInitialServer) ? selectedAway : selectedHome
                     Picker("Receiver", selection: $selectedInitialReceiver) { ForEach(validReceivers, id: \.self) { Text($0).tag($0) } }.pickerStyle(.segmented)
                 }
+                
                 Text("Position of \(selectedInitialServer)?").font(.headline)
                 HStack {
                     Button("Wall Side") { serverStartsOnWall = true }.padding().frame(maxWidth: .infinity).background(serverStartsOnWall ? Color.blue : Color.gray.opacity(0.2)).foregroundColor(serverStartsOnWall ? .white : .primary).cornerRadius(10)
@@ -271,7 +500,6 @@ struct TossView: View {
     }
 }
 
-// MARK: - UPDATED SEARCH SHEET
 struct PlayerSearchSheet: View {
     @ObservedObject var fsManager: FirestoreManager
     var onSelect: (Player) -> Void
@@ -302,19 +530,12 @@ struct PlayerSearchSheet: View {
             }
             .searchable(text: $searchText)
             .task {
-                // LOAD ALL PLAYERS INITIALLY
-                if let players = try? await fsManager.fetchAllPlayers() {
-                    searchResults = players
-                }
+                if let players = try? await fsManager.fetchAllPlayers() { searchResults = players }
             }
             .onChange(of: searchText) { _, nv in
                 Task {
-                    if nv.isEmpty {
-                        // RE-LOAD ALL IF SEARCH CLEARED
-                        searchResults = (try? await fsManager.fetchAllPlayers()) ?? []
-                    } else {
-                        searchResults = (try? await fsManager.searchPlayers(query: nv)) ?? []
-                    }
+                    if nv.isEmpty { searchResults = (try? await fsManager.fetchAllPlayers()) ?? [] }
+                    else { searchResults = (try? await fsManager.searchPlayers(query: nv)) ?? [] }
                 }
             }
             .navigationTitle("Search Players")
@@ -323,10 +544,7 @@ struct PlayerSearchSheet: View {
     
     func addNewPlayer() {
         Task {
-            if let p = try? await fsManager.addNewPlayer(name: searchText) {
-                onSelect(p)
-                dismiss()
-            }
+            if let p = try? await fsManager.addNewPlayer(name: searchText) { onSelect(p); dismiss() }
         }
     }
 }

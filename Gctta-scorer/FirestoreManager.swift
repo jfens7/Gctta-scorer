@@ -29,24 +29,53 @@ struct Fixture: Identifiable, Codable, Hashable {
     }
 }
 
+// NEW: Structs for Night's Stats
+struct PlayerNightStat {
+    var wins: Int = 0
+    var played: Int = 0
+}
+
+struct FixtureStats {
+    var homeTeamScore: Int = 0
+    var awayTeamScore: Int = 0
+    var playerStats: [String: PlayerNightStat] = [:]
+}
+
 struct SavedMatchState {
-    let homeScore: Int; let awayScore: Int; let setHistory: [SetRecord]
-    let leftPlayers: [String]; let rightPlayers: [String]
-    let server: String; let receiver: String; let totalTime: Int; let activeTime: Int
-    let lastSetServer: String; let lastSetReceiver: String
-    let initialMatchServer: String; let initialMatchReceiver: String
+    let homeScore: Int
+    let awayScore: Int
+    let setHistory: [SetRecord]
+    let leftPlayers: [String]
+    let rightPlayers: [String]
+    let server: String
+    let receiver: String
+    let totalTime: Int
+    let activeTime: Int
+    let lastSetServer: String
+    let lastSetReceiver: String
+    let initialMatchServer: String
+    let initialMatchReceiver: String
+    let homeTimeoutUsed: Bool
+    let awayTimeoutUsed: Bool
 }
 
 struct ScoreboardConfig: Hashable, Codable {
     let fixture: Fixture
-    let homePlayers: [String]; let awayPlayers: [String]
-    let initialServerName: String; let initialReceiverName: String
-    let serverIsOnLeft: Bool; let bestOf: Int; let isTest: Bool
+    let homePlayers: [String]
+    let awayPlayers: [String]
+    let initialServerName: String
+    let initialReceiverName: String
+    let serverIsOnLeft: Bool
+    let bestOf: Int
+    let isTest: Bool
     var isResume: Bool = false
 }
 
 struct SetRecord: Identifiable, Hashable, Codable {
-    var id = UUID(); let setNumber: Int; var homeScore: Int; var awayScore: Int
+    var id = UUID()
+    let setNumber: Int
+    var homeScore: Int
+    var awayScore: Int
 }
 
 // MARK: - MANAGER CLASS
@@ -72,7 +101,7 @@ class FirestoreManager: ObservableObject {
         self.consoleOutput += msg + "\n"
     }
     
-    // MARK: - LISTENER (Date Filter Re-Enabled)
+    // MARK: - LISTENER
     func listenToTodayFixtures() {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -81,10 +110,9 @@ class FirestoreManager: ObservableObject {
         
         log("🚀 INITIALIZING CONNECTION...")
         log("📅 Searching Firebase for date: [\(today)]")
-        log("📂 Target Collection: 'fixture_schedule'")
         
         listener = db.collection("fixture_schedule")
-            .whereField("date", isEqualTo: today) // DATE FILTER RE-ADDED HERE
+            .whereField("date", isEqualTo: today)
             .addSnapshotListener { [weak self] snapshot, error in
                 guard let self = self else { return }
                 
@@ -108,13 +136,12 @@ class FirestoreManager: ObservableObject {
                     else if let tStr = data["table"] as? String { tableVal = tStr }
                     else { tableVal = "?" }
                     
-                    // Handle Week whether it's an Int or String
                     let weekVal: String?
                     if let wInt = data["week"] as? Int { weekVal = String(wInt) }
                     else if let wStr = data["week"] as? String { weekVal = wStr }
                     else { weekVal = nil }
                     
-                    let fixture = Fixture(
+                    return Fixture(
                         id: doc.documentID,
                         table: tableVal,
                         date: data["date"] as? String ?? "Unknown",
@@ -124,9 +151,7 @@ class FirestoreManager: ObservableObject {
                         matchStatus: data["match_status"] as? String,
                         week: weekVal
                     )
-                    return fixture
-                }
-                .sorted { $0.table.localizedStandardCompare($1.table) == .orderedAscending }
+                }.sorted { $0.table.localizedStandardCompare($1.table) == .orderedAscending }
             }
     }
     
@@ -158,9 +183,13 @@ class FirestoreManager: ObservableObject {
                 lastSetServer: data["last_set_start_server"] as? String ?? "",
                 lastSetReceiver: data["last_set_start_receiver"] as? String ?? "",
                 initialMatchServer: data["initial_match_server"] as? String ?? "",
-                initialMatchReceiver: data["initial_match_receiver"] as? String ?? ""
+                initialMatchReceiver: data["initial_match_receiver"] as? String ?? "",
+                homeTimeoutUsed: data["home_timeout_used"] as? Bool ?? false,
+                awayTimeoutUsed: data["away_timeout_used"] as? Bool ?? false
             )
-        } catch { return nil }
+        } catch {
+            return nil
+        }
     }
     
     func forceFinish(fixtureId: String) {
@@ -179,7 +208,9 @@ class FirestoreManager: ObservableObject {
             "game_scores_history": "",
             "current_server": "",
             "current_receiver": "",
-            "timer_label": ""
+            "timer_label": "",
+            "home_timeout_used": false,
+            "away_timeout_used": false
         ])
     }
     
@@ -203,7 +234,13 @@ class FirestoreManager: ObservableObject {
 
     func searchPlayers(query: String) async throws -> [Player] {
         guard query.count >= 1 else { return [] }
-        let snapshot = try await db.collection("players").order(by: "name").start(at: [query]).end(at: [query + "\u{f8ff}"]).limit(to: 10).getDocuments()
+        let snapshot = try await db.collection("players")
+            .order(by: "name")
+            .start(at: [query])
+            .end(at: [query + "\u{f8ff}"])
+            .limit(to: 10)
+            .getDocuments()
+        
         return snapshot.documents.compactMap { try? $0.data(as: Player.self) }
     }
     
@@ -224,12 +261,15 @@ class FirestoreManager: ObservableObject {
         do {
             let doc = try await db.collection("teams").document(teamName).getDocument()
             return doc.data()?["players"] as? [String] ?? []
-        } catch { return [] }
+        } catch {
+            return []
+        }
     }
     
     func fetchPlayedPairs(fixture: Fixture) async -> Set<String> {
         guard let fid = fixture.id else { return [] }
         let snapshot = try? await db.collection("match_results").whereField("fixture_id", isEqualTo: fid).getDocuments()
+        
         var played = Set<String>()
         snapshot?.documents.forEach { doc in
             let data = doc.data()
@@ -242,6 +282,40 @@ class FirestoreManager: ObservableObject {
         return played
     }
     
+    // NEW: Fetch Night's Team Score & Player Stats
+    func fetchFixtureStats(fixtureId: String) async -> FixtureStats {
+        var stats = FixtureStats()
+        guard let snapshot = try? await db.collection("match_results").whereField("fixture_id", isEqualTo: fixtureId).getDocuments() else { return stats }
+        
+        for doc in snapshot.documents {
+            let data = doc.data()
+            let homePlayers = data["home_players"] as? [String] ?? []
+            let awayPlayers = data["away_players"] as? [String] ?? []
+            let homeSets = data["live_home_sets"] as? Int ?? 0
+            let awaySets = data["live_away_sets"] as? Int ?? 0
+            
+            let homeWon = homeSets > awaySets
+            
+            if homeWon { stats.homeTeamScore += 1 }
+            else if awaySets > homeSets { stats.awayTeamScore += 1 }
+            
+            for hp in homePlayers {
+                var pStat = stats.playerStats[hp] ?? PlayerNightStat()
+                pStat.played += 1
+                if homeWon { pStat.wins += 1 }
+                stats.playerStats[hp] = pStat
+            }
+            
+            for ap in awayPlayers {
+                var pStat = stats.playerStats[ap] ?? PlayerNightStat()
+                pStat.played += 1
+                if !homeWon { pStat.wins += 1 }
+                stats.playerStats[ap] = pStat
+            }
+        }
+        return stats
+    }
+    
     // MARK: - TIMELINE LOGGING
     func saveTimelineEvent(fixtureId: String?, data: [String: Any]) {
         guard let fid = fixtureId else { return }
@@ -251,51 +325,82 @@ class FirestoreManager: ObservableObject {
     }
     
     // MARK: - UPDATE LIVE
-    func updateLiveScore(fixtureId: String?, homeScore: Int, awayScore: Int, homeSets: Int, awaySets: Int, server: String, receiver: String, timerLabel: String?, timerValue: Int, totalTime: String, activeTime: String, homePlayers: [String], awayPlayers: [String], leftPlayers: [String], rightPlayers: [String], matchStatus: String, gameStats: [String: Any], setHistory: [SetRecord], lastSetServer: String, lastSetReceiver: String, initialMatchServer: String, initialMatchReceiver: String, gameHistoryString: String) {
+    func updateLiveScore(fixtureId: String?, homeScore: Int, awayScore: Int, homeSets: Int, awaySets: Int, server: String, receiver: String, timerLabel: String?, timerValue: Int, totalTime: String, activeTime: String, homePlayers: [String], awayPlayers: [String], leftPlayers: [String], rightPlayers: [String], matchStatus: String, gameStats: [String: Any], setHistory: [SetRecord], lastSetServer: String, lastSetReceiver: String, initialMatchServer: String, initialMatchReceiver: String, gameHistoryString: String, homeTimeoutUsed: Bool, awayTimeoutUsed: Bool) {
+        
         guard let fid = fixtureId else { return }
         let historyJson = (try? JSONEncoder().encode(setHistory)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         
         var data: [String: Any] = [
-            "live_home_score": homeScore, "live_away_score": awayScore,
-            "live_home_sets": homeSets, "live_away_sets": awaySets,
-            "current_server": server, "current_receiver": receiver,
-            "timer_label": timerLabel ?? "", "timer_value": timerValue,
-            "total_duration": totalTime, "play_duration": activeTime,
+            "live_home_score": homeScore,
+            "live_away_score": awayScore,
+            "live_home_sets": homeSets,
+            "live_away_sets": awaySets,
+            "current_server": server,
+            "current_receiver": receiver,
+            "timer_label": timerLabel ?? "",
+            "timer_value": timerValue,
+            "total_duration": totalTime,
+            "play_duration": activeTime,
             "match_status": matchStatus,
             "last_live_update": FieldValue.serverTimestamp(),
-            "home_players": homePlayers, "away_players": awayPlayers,
-            "left_players": leftPlayers, "right_players": rightPlayers,
+            "home_players": homePlayers,
+            "away_players": awayPlayers,
+            "left_players": leftPlayers,
+            "right_players": rightPlayers,
             "set_history_json": historyJson,
             "game_scores_history": gameHistoryString,
-            "last_set_start_server": lastSetServer, "last_set_start_receiver": lastSetReceiver,
-            "initial_match_server": initialMatchServer, "initial_match_receiver": initialMatchReceiver
+            "last_set_start_server": lastSetServer,
+            "last_set_start_receiver": lastSetReceiver,
+            "initial_match_server": initialMatchServer,
+            "initial_match_receiver": initialMatchReceiver,
+            "home_timeout_used": homeTimeoutUsed,
+            "away_timeout_used": awayTimeoutUsed
         ]
-        for (key, value) in gameStats { data[key] = value }
+        
+        for (key, value) in gameStats {
+            data[key] = value
+        }
+        
         db.collection("fixture_schedule").document(fid).updateData(data)
     }
     
-    // MARK: - FINAL UPLOAD
+    // MARK: - FINAL UPLOAD (PENDING APPROVAL)
     func uploadFinalScore(fixture: Fixture, homePlayers: [String], awayPlayers: [String], history: [SetRecord], isTest: Bool, totalTime: String, activeTime: String) {
         let gameHistoryString = history.map { "\($0.homeScore)-\($0.awayScore)" }.joined(separator: ", ")
+        let hSets = history.filter { $0.homeScore > $0.awayScore }.count
+        let aSets = history.filter { $0.awayScore > $0.homeScore }.count
+        
         let data: [String: Any] = [
-            "fixture_id": fixture.id ?? "", "table": fixture.table,
-            "division": fixture.division, "home_team": fixture.homeTeam, "away_team": fixture.awayTeam,
-            "home_players": homePlayers, "away_players": awayPlayers,
+            "fixture_id": fixture.id ?? "",
+            "table": fixture.table,
+            "division": fixture.division,
+            "home_team": fixture.homeTeam,
+            "away_team": fixture.awayTeam,
+            "home_players": homePlayers,
+            "away_players": awayPlayers,
             "set_scores": history.map { ["home": $0.homeScore, "away": $0.awayScore] },
             "game_scores_history": gameHistoryString,
-            "total_duration": totalTime, "play_duration": activeTime,
-            "is_test": isTest, "timestamp": FieldValue.serverTimestamp(),
-            "date": fixture.date, "match_status": "Finished"
+            "live_home_sets": hSets,
+            "live_away_sets": aSets, // Explicitly provide S1/S2 for Admin verification
+            "total_duration": totalTime,
+            "play_duration": activeTime,
+            "is_test": isTest,
+            "timestamp": FieldValue.serverTimestamp(),
+            "date": fixture.date,
+            "match_status": "Finished",
+            "status": "pending" // ⚠️ PLACES MATCH IN ADMIN APPROVAL QUEUE ⚠️
         ]
         
         db.collection("match_results").addDocument(data: data)
+        
         if let fid = fixture.id {
             db.collection("fixture_schedule").document(fid).updateData([
                 "match_status": "Finished",
                 "game_scores_history": gameHistoryString,
-                "live_home_sets": history.filter { $0.homeScore > $0.awayScore }.count,
-                "live_away_sets": history.filter { $0.awayScore > $0.homeScore }.count,
-                "home_players": homePlayers, "away_players": awayPlayers
+                "live_home_sets": hSets,
+                "live_away_sets": aSets,
+                "home_players": homePlayers,
+                "away_players": awayPlayers
             ])
         }
     }
