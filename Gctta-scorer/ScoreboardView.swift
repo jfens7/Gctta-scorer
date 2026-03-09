@@ -479,22 +479,52 @@ struct TimerButton: View {
 
 struct ScoreSideView: View {
     let names: [String]; let points: Int; let sets: Int; let color: Color; let isServing: Bool; let label: String; let serverName: String; let receiverName: String; let isDoubles: Bool; let timeoutUsed: Bool; let action: () -> Void
+    
     var body: some View {
         Button(action: action) {
             VStack(spacing: 20) {
                 HStack { Text(label).font(.caption).padding(8).background(.black.opacity(0.1)).cornerRadius(5); if timeoutUsed { HStack(spacing: 4) { Image(systemName: "square.fill").foregroundColor(.white); Text("T/O USED").font(.caption.bold()).foregroundColor(.white) }.padding(8).background(Color.white.opacity(0.2)).cornerRadius(5) } }
+                
+                // MASSIVE NAMES UPDATE
                 VStack(spacing: 12) {
                     ForEach(names, id: \.self) { name in
-                        HStack(alignment: .center, spacing: 8) {
-                            if name == serverName { Image(systemName: "tennisball.fill").foregroundColor(.yellow).font(.title2) } else if isDoubles && name == receiverName { Image(systemName: "arrow.down.to.line.alt").foregroundColor(.cyan).font(.title2) }
-                            Text(name).font(name == serverName || (isDoubles && name == receiverName) ? .title.bold() : .title2).foregroundColor(name == serverName ? .yellow : (isDoubles && name == receiverName ? .cyan : .white)).opacity((isDoubles && name != serverName && name != receiverName) ? 0.5 : 1.0)
+                        let isActive = name == serverName || (isDoubles && name == receiverName)
+                        HStack(alignment: .center, spacing: 10) {
+                            if name == serverName {
+                                Image(systemName: "tennisball.fill").foregroundColor(.yellow).font(.system(size: 45))
+                            } else if isDoubles && name == receiverName {
+                                Image(systemName: "arrow.down.to.line.alt").foregroundColor(.cyan).font(.system(size: 45))
+                            }
+                            
+                            Text(name)
+                                .font(.system(size: isActive ? 60 : 45, weight: isActive ? .black : .bold))
+                                .foregroundColor(name == serverName ? .yellow : (isDoubles && name == receiverName ? .cyan : .white))
+                                .opacity((isDoubles && !isActive) ? 0.5 : 1.0)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.5)
                         }
                     }
                 }
+                
                 Text("\(points)").font(.system(size: 250, weight: .black))
-                if names.contains(serverName) { let sName = serverName.components(separatedBy: " ").last ?? serverName; HStack { Image(systemName: "tennisball.fill").foregroundColor(.yellow); Text("\(sName.uppercased()) SERVING").font(.headline.bold()).foregroundColor(.yellow) }.padding(8).background(Color.black.opacity(0.3)).cornerRadius(8) }
-                else if isDoubles && names.contains(receiverName) { let rName = receiverName.components(separatedBy: " ").last ?? receiverName; HStack { Image(systemName: "arrow.down.to.line.alt").foregroundColor(.cyan); Text("\(rName.uppercased()) RECEIVING").font(.headline.bold()).foregroundColor(.cyan) }.padding(8).background(Color.black.opacity(0.3)).cornerRadius(8) }
-                else { Text(" ").font(.headline).padding(8) }
+                
+                // LARGER SERVING TAGS
+                if names.contains(serverName) {
+                    let sName = serverName.components(separatedBy: " ").last ?? serverName
+                    HStack {
+                        Image(systemName: "tennisball.fill").foregroundColor(.yellow)
+                        Text("\(sName.uppercased()) SERVING").font(.system(size: 30, weight: .bold)).foregroundColor(.yellow)
+                    }.padding(16).background(Color.black.opacity(0.3)).cornerRadius(12)
+                }
+                else if isDoubles && names.contains(receiverName) {
+                    let rName = receiverName.components(separatedBy: " ").last ?? receiverName
+                    HStack {
+                        Image(systemName: "arrow.down.to.line.alt").foregroundColor(.cyan)
+                        Text("\(rName.uppercased()) RECEIVING").font(.system(size: 30, weight: .bold)).foregroundColor(.cyan)
+                    }.padding(16).background(Color.black.opacity(0.3)).cornerRadius(12)
+                }
+                else { Text(" ").font(.system(size: 30)).padding(16) }
+                
                 Text("SETS: \(sets)").font(.title.bold())
             }.frame(maxWidth: .infinity, maxHeight: .infinity).background(color.opacity(0.05)).foregroundColor(color)
         }.buttonStyle(.plain)

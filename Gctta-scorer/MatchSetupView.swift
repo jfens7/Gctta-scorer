@@ -15,6 +15,10 @@ struct MatchSetupView: View {
     @State private var homeRoster: [String] = []
     @State private var awayRoster: [String] = []
     
+    // Explicit Letter Mappings
+    @State private var homeLetters: [String: String] = [:]
+    @State private var awayLetters: [String: String] = [:]
+    
     @State private var playedPairs: Set<String> = []
     @State private var fixtureStats = FixtureStats()
     @State private var showingErrorAlert = false
@@ -25,7 +29,6 @@ struct MatchSetupView: View {
     @State private var isReordering = false
     
     // Toss State
-    @State private var showingToss = false
     @State private var activeMatchToStart: FixtureMatch?
     @State private var activeHomePlayers: [String] = []
     @State private var activeAwayPlayers: [String] = []
@@ -38,6 +41,10 @@ struct MatchSetupView: View {
     // Search State
     @State private var showingSearchSheet = false
     @State private var activeSearchTeamIsHome = true
+    
+    // Rank Selection State
+    @State private var playerPendingRank: Player? = nil
+    @State private var showRankDialog = false
     
     @State private var refreshTrigger = false
 
@@ -83,6 +90,7 @@ struct MatchSetupView: View {
                     getLetter: getLetter,
                     onMoveUp: { movePlayerUp(name: $0, isHome: true) },
                     onMoveDown: { movePlayerDown(name: $0, isHome: true) },
+                    onDelete: { removePlayer(name: $0, isHome: true) },
                     onAdd: { activeSearchTeamIsHome = true; showingSearchSheet = true }
                 )
                 .frame(maxWidth: .infinity)
@@ -98,6 +106,7 @@ struct MatchSetupView: View {
                     getLetter: getLetter,
                     onMoveUp: { movePlayerUp(name: $0, isHome: false) },
                     onMoveDown: { movePlayerDown(name: $0, isHome: false) },
+                    onDelete: { removePlayer(name: $0, isHome: false) },
                     onAdd: { activeSearchTeamIsHome = false; showingSearchSheet = true }
                 )
                 .frame(maxWidth: .infinity)
@@ -115,7 +124,7 @@ struct MatchSetupView: View {
                         .font(.title2.bold())
                         .foregroundColor(.secondary)
                         .tracking(2)
-                    Text("Letters are automatically mapped to the Player's Rank (1, 2, or 3). Use arrows to adjust.")
+                    Text("Matches will dynamically appear below as you assign players to their ranks.")
                         .font(.caption)
                         .foregroundColor(.gray)
                 }
@@ -137,79 +146,99 @@ struct MatchSetupView: View {
             }
             .padding(.horizontal)
             
-            // --- AUTOMATED MATCH LIST ---
-            List {
-                ForEach(matchSequence) { match in
-                    let index = matchSequence.firstIndex(of: match) ?? 0
-                    let hNames = match.homeLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: true) }
-                    let aNames = match.awayLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: false) }
-                    let canStart = hNames.count == match.homeLetters.count && aNames.count == match.awayLetters.count
-                    
-                    HStack {
-                        Text("\(index + 1).")
-                            .font(.title3.bold())
-                            .frame(width: 35, alignment: .leading)
-                            .foregroundColor(.gray)
+            // --- AUTOMATED MATCH LIST (DYNAMIC VISIBILITY) ---
+            let visibleCount = matchSequence.filter { canMatchStart(match: $0) }.count
+            
+            if visibleCount == 0 && !isReordering {
+                VStack {
+                    Spacer()
+                    Image(systemName: "person.fill.badge.plus")
+                        .font(.system(size: 40))
+                        .foregroundColor(.gray)
+                        .padding(.bottom, 5)
+                    Text("Add players above and assign their ranks to generate matches.")
+                        .font(.headline)
+                        .foregroundColor(.gray)
+                    Spacer()
+                }
+                .frame(maxHeight: .infinity)
+            } else {
+                List {
+                    ForEach(matchSequence) { match in
+                        let index = matchSequence.firstIndex(of: match) ?? 0
+                        let hNames = match.homeLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: true) }
+                        let aNames = match.awayLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: false) }
+                        let canStart = hNames.count == match.homeLetters.count && aNames.count == match.awayLetters.count
                         
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(match.isDoubles ? "DOUBLES" : "SINGLES")
-                                .font(.caption.bold())
-                                .foregroundColor(match.isDoubles ? .purple : .blue)
-                                .tracking(1)
-                            
+                        // SMART VISIBILITY: Only show the match if players exist, or if we are actively reordering
+                        if canStart || isReordering {
                             HStack {
-                                Text("\(hNames.joined(separator: " & "))")
-                                    .font(.headline.bold())
-                                    .foregroundColor(hNames.isEmpty ? .gray : .white)
-                                Text("(\(match.homeLetters.joined(separator: "&")))")
-                                    .font(.caption).foregroundColor(.blue)
+                                Text("\(index + 1).")
+                                    .font(.title3.bold())
+                                    .frame(width: 35, alignment: .leading)
+                                    .foregroundColor(.gray)
                                 
-                                Text(" vs ").foregroundColor(.gray).font(.caption.bold())
-                                
-                                Text("\(aNames.joined(separator: " & "))")
-                                    .font(.headline.bold())
-                                    .foregroundColor(aNames.isEmpty ? .gray : .white)
-                                Text("(\(match.awayLetters.joined(separator: "&")))")
-                                    .font(.caption).foregroundColor(.red)
-                            }
-                        }
-                        Spacer()
-                        
-                        if !isReordering {
-                            if canStart {
-                                Image(systemName: "play.circle.fill")
-                                    .font(.system(size: 35))
-                                    .foregroundColor(.green)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        startMatch(match: match, hNames: hNames, aNames: aNames)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(match.isDoubles ? "DOUBLES" : "SINGLES")
+                                        .font(.caption.bold())
+                                        .foregroundColor(match.isDoubles ? .purple : .blue)
+                                        .tracking(1)
+                                    
+                                    HStack {
+                                        Text("\(hNames.joined(separator: " & "))")
+                                            .font(.headline.bold())
+                                            .foregroundColor(hNames.isEmpty ? .gray : .white)
+                                        Text("(\(match.homeLetters.joined(separator: "&")))")
+                                            .font(.caption).foregroundColor(.blue)
+                                        
+                                        Text(" vs ").foregroundColor(.gray).font(.caption.bold())
+                                        
+                                        Text("\(aNames.joined(separator: " & "))")
+                                            .font(.headline.bold())
+                                            .foregroundColor(aNames.isEmpty ? .gray : .white)
+                                        Text("(\(match.awayLetters.joined(separator: "&")))")
+                                            .font(.caption).foregroundColor(.red)
                                     }
-                            } else {
-                                Text("Assign Players")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.orange)
+                                }
+                                Spacer()
+                                
+                                if !isReordering {
+                                    if canStart {
+                                        Image(systemName: "play.circle.fill")
+                                            .font(.system(size: 35))
+                                            .foregroundColor(.green)
+                                            .contentShape(Rectangle())
+                                            .onTapGesture {
+                                                startMatch(match: match, hNames: hNames, aNames: aNames)
+                                            }
+                                    } else {
+                                        Text("Assign Players")
+                                            .font(.caption.bold())
+                                            .foregroundColor(.orange)
+                                    }
+                                } else {
+                                    Image(systemName: "line.3.horizontal")
+                                        .foregroundColor(.gray)
+                                        .font(.title2)
+                                }
                             }
-                        } else {
-                            Image(systemName: "line.3.horizontal")
-                                .foregroundColor(.gray)
-                                .font(.title2)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 12)
+                            .background(Color.black.opacity(0.3))
+                            .cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                            .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
                         }
                     }
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .background(Color.black.opacity(0.3))
-                    .cornerRadius(12)
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.white.opacity(0.1), lineWidth: 1))
-                    .listRowBackground(Color.clear)
-                    .listRowSeparator(.hidden)
-                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 8, trailing: 16))
+                    .onMove { from, to in
+                        matchSequence.move(fromOffsets: from, toOffset: to)
+                    }
                 }
-                .onMove { from, to in
-                    matchSequence.move(fromOffsets: from, toOffset: to)
-                }
+                .listStyle(.plain)
+                .environment(\.editMode, .constant(isReordering ? .active : .inactive))
             }
-            .listStyle(.plain)
-            .environment(\.editMode, .constant(isReordering ? .active : .inactive))
         }
         .onAppear {
             Task {
@@ -220,47 +249,150 @@ struct MatchSetupView: View {
                 
                 if homeRoster.isEmpty {
                     let rosters = await fsManager.fetchMatchRosters(homeTeam: fixture.homeTeam, awayTeam: fixture.awayTeam)
-                    homeRoster = rosters.home; awayRoster = rosters.away
+                    homeRoster = rosters.home
+                    awayRoster = rosters.away
+                    autoAssignLetters()
                 }
-                if matchSequence.isEmpty {
-                    generateSequence()
-                }
+                generateSequence()
             }
         }
+        
         .alert("Missing Players", isPresented: $showingErrorAlert) {
             Button("OK", role: .cancel) { }
         } message: { Text(errorMessage) }
         
-        .sheet(isPresented: $showingToss) {
-            if let match = activeMatchToStart {
-                TossView(
-                    selectedHome: activeHomePlayers,
-                    selectedAway: activeAwayPlayers,
-                    isDoubles: match.isDoubles,
-                    selectedBestOf: $selectedBestOf,
-                    isTestMatch: $isTestMatch,
-                    serverStartsOnWall: $serverStartsOnWall,
-                    selectedInitialServer: $selectedInitialServer,
-                    selectedInitialReceiver: $selectedInitialReceiver,
-                    onStart: { launchScoreboard() }
-                )
+        // RANK SELECTION DIALOG
+        .confirmationDialog("Select Rank for \(playerPendingRank?.name ?? "")", isPresented: $showRankDialog, titleVisibility: .visible) {
+            if isDiv1 {
+                Button("Rank 1 (\(activeSearchTeamIsHome ? "A" : "X"))") { assignRank(1) }
+                Button("Rank 2 (\(activeSearchTeamIsHome ? "B" : "Y"))") { assignRank(2) }
+            } else {
+                Button("Rank 1 (\(activeSearchTeamIsHome ? "B" : "Z"))") { assignRank(1) }
+                Button("Rank 2 (\(activeSearchTeamIsHome ? "C" : "X"))") { assignRank(2) }
+                Button("Rank 3 (\(activeSearchTeamIsHome ? "A" : "Y"))") { assignRank(3) }
             }
+            Button("Cancel", role: .cancel) { playerPendingRank = nil }
+        }
+        
+        .sheet(item: $activeMatchToStart) { match in
+            TossView(
+                selectedHome: activeHomePlayers,
+                selectedAway: activeAwayPlayers,
+                isDoubles: match.isDoubles,
+                selectedBestOf: $selectedBestOf,
+                isTestMatch: $isTestMatch,
+                serverStartsOnWall: $serverStartsOnWall,
+                selectedInitialServer: $selectedInitialServer,
+                selectedInitialReceiver: $selectedInitialReceiver,
+                onStart: { launchScoreboard() }
+            )
         }
         
         .sheet(isPresented: $showingSearchSheet) {
             PlayerSearchSheet(fsManager: fsManager) { player in
-                if activeSearchTeamIsHome {
-                    if !homeRoster.contains(player.name) { homeRoster.append(player.name) }
-                } else {
-                    if !awayRoster.contains(player.name) { awayRoster.append(player.name) }
-                }
-                refreshTrigger.toggle()
+                playerPendingRank = player
+                showRankDialog = true
             }
         }
     }
     
-    // MARK: - RANKING & LETTER LOGIC
+    // MARK: - RANKING ASSIGNMENT LOGIC
+    
+    func assignRank(_ rank: Int) {
+        guard let p = playerPendingRank else { return }
+        let letter: String
+        
+        // Map the selected rank to the specific explicit letter
+        if isDiv1 {
+            if activeSearchTeamIsHome { letter = rank == 1 ? "A" : "B" }
+            else { letter = rank == 1 ? "X" : "Y" }
+        } else {
+            if activeSearchTeamIsHome {
+                if rank == 1 { letter = "B" } else if rank == 2 { letter = "C" } else { letter = "A" }
+            } else {
+                if rank == 1 { letter = "Z" } else if rank == 2 { letter = "X" } else { letter = "Y" }
+            }
+        }
+        
+        // If this letter is already taken, remove the old player to allow substitutions
+        if activeSearchTeamIsHome {
+            homeLetters.forEach { k, v in if v == letter { homeLetters.removeValue(forKey: k); homeRoster.removeAll(where: { $0 == k }) } }
+            homeLetters[p.name] = letter
+            if !homeRoster.contains(p.name) { homeRoster.append(p.name) }
+        } else {
+            awayLetters.forEach { k, v in if v == letter { awayLetters.removeValue(forKey: k); awayRoster.removeAll(where: { $0 == k }) } }
+            awayLetters[p.name] = letter
+            if !awayRoster.contains(p.name) { awayRoster.append(p.name) }
+        }
+        
+        sortRosters()
+        refreshTrigger.toggle()
+    }
+    
+    // Ranks values (1, 2, 3) to sort the UI column intelligently
+    func rankValue(for letter: String, isHome: Bool) -> Int {
+        if isDiv1 {
+            if isHome { return letter == "A" ? 1 : 2 }
+            else { return letter == "X" ? 1 : 2 }
+        } else {
+            if isHome {
+                if letter == "B" { return 1 }
+                if letter == "C" { return 2 }
+                if letter == "A" { return 3 }
+            } else {
+                if letter == "Z" { return 1 }
+                if letter == "X" { return 2 }
+                if letter == "Y" { return 3 }
+            }
+        }
+        return 99
+    }
+    
+    func sortRosters() {
+        homeRoster.sort { rankValue(for: homeLetters[$0] ?? "?", isHome: true) < rankValue(for: homeLetters[$1] ?? "?", isHome: true) }
+        awayRoster.sort { rankValue(for: awayLetters[$0] ?? "?", isHome: false) < rankValue(for: awayLetters[$1] ?? "?", isHome: false) }
+    }
+    
+    // Auto-assigns default letters if we pull an existing roster from the database
+    func autoAssignLetters() {
+        for (idx, name) in homeRoster.enumerated() {
+            if homeLetters[name] == nil {
+                if isDiv1 { homeLetters[name] = idx == 0 ? "A" : "B" }
+                else { homeLetters[name] = idx == 0 ? "B" : (idx == 1 ? "C" : "A") }
+            }
+        }
+        for (idx, name) in awayRoster.enumerated() {
+            if awayLetters[name] == nil {
+                if isDiv1 { awayLetters[name] = idx == 0 ? "X" : "Y" }
+                else { awayLetters[name] = idx == 0 ? "Z" : (idx == 1 ? "X" : "Y") }
+            }
+        }
+        sortRosters()
+    }
+
+    func getLetter(for name: String, isHome: Bool) -> String {
+        return isHome ? (homeLetters[name] ?? "?") : (awayLetters[name] ?? "?")
+    }
+
+    func getPlayerWithLetter(letter: String, isHome: Bool) -> String? {
+        let dict = isHome ? homeLetters : awayLetters
+        let roster = isHome ? homeRoster : awayRoster
+        for (name, l) in dict {
+            if l == letter && roster.contains(name) { return name }
+        }
+        return nil
+    }
+
+    func canMatchStart(match: FixtureMatch) -> Bool {
+        let hNames = match.homeLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: true) }
+        let aNames = match.awayLetters.compactMap { getPlayerWithLetter(letter: $0, isHome: false) }
+        return hNames.count == match.homeLetters.count && aNames.count == match.awayLetters.count
+    }
+
+    // MARK: - SEQUENCE GENERATOR
     func generateSequence() {
+        // We always generate the FULL sequence.
+        // The List will intelligently hide matches if players aren't assigned yet.
         if isDiv1 {
             matchSequence = [
                 FixtureMatch(homeLetters: ["A"], awayLetters: ["X"], isDoubles: false),
@@ -285,68 +417,69 @@ struct MatchSetupView: View {
             ]
         }
     }
-
-    func getPlayerWithLetter(letter: String, isHome: Bool) -> String? {
-        let roster = isHome ? homeRoster : awayRoster
-        for player in roster {
-            if getLetter(for: player, isHome: isHome) == letter { return player }
-        }
-        return nil
-    }
-
-    // MAPS RANK (INDEX) TO THE EXACT ASSIGNED LETTER
-    func getLetter(for name: String, isHome: Bool) -> String {
-        let roster = isHome ? homeRoster : awayRoster
-        let idx = roster.firstIndex(of: name) ?? 0
-        
-        if isDiv1 {
-            if isHome { return idx == 0 ? "A" : "B" }
-            else { return idx == 0 ? "Y" : "X" }
-        } else {
-            if isHome {
-                if idx == 0 { return "B" }
-                if idx == 1 { return "C" }
-                return "A"
-            } else {
-                if idx == 0 { return "Z" }
-                if idx == 1 { return "X" }
-                return "Y"
-            }
-        }
-    }
     
-    // MOVEMENT CONTROLS FOR RANK RE-ORDERING
+    // MARK: - MOVEMENT CONTROLS
+    // Up/Down arrows now directly swap the assigned letters between players and re-sorts
     func movePlayerUp(name: String, isHome: Bool) {
         var roster = isHome ? homeRoster : awayRoster
+        var dict = isHome ? homeLetters : awayLetters
         if let idx = roster.firstIndex(of: name), idx > 0 {
-            roster.swapAt(idx, idx - 1)
-            if isHome { homeRoster = roster } else { awayRoster = roster }
+            let otherName = roster[idx - 1]
+            
+            let tempLetter = dict[name]
+            dict[name] = dict[otherName]
+            dict[otherName] = tempLetter
+            
+            if isHome { homeLetters = dict } else { awayLetters = dict }
+            sortRosters()
             refreshTrigger.toggle()
         }
     }
 
     func movePlayerDown(name: String, isHome: Bool) {
         var roster = isHome ? homeRoster : awayRoster
+        var dict = isHome ? homeLetters : awayLetters
         if let idx = roster.firstIndex(of: name), idx < roster.count - 1 {
-            roster.swapAt(idx, idx + 1)
-            if isHome { homeRoster = roster } else { awayRoster = roster }
+            let otherName = roster[idx + 1]
+            
+            let tempLetter = dict[name]
+            dict[name] = dict[otherName]
+            dict[otherName] = tempLetter
+            
+            if isHome { homeLetters = dict } else { awayLetters = dict }
+            sortRosters()
             refreshTrigger.toggle()
         }
     }
+    
+    func removePlayer(name: String, isHome: Bool) {
+        if isHome {
+            homeRoster.removeAll { $0 == name }
+            homeLetters.removeValue(forKey: name)
+        } else {
+            awayRoster.removeAll { $0 == name }
+            awayLetters.removeValue(forKey: name)
+        }
+        sortRosters()
+        refreshTrigger.toggle()
+    }
 
     func startMatch(match: FixtureMatch, hNames: [String], aNames: [String]) {
-        self.activeMatchToStart = match
         self.activeHomePlayers = hNames
         self.activeAwayPlayers = aNames
         self.selectedInitialServer = hNames.first ?? ""
         self.selectedInitialReceiver = aNames.first ?? ""
         
-        if isDiv1 {
+        let maxPlayers = max(homeRoster.count, awayRoster.count)
+        if maxPlayers <= 1 {
+            self.selectedBestOf = 7
+        } else if maxPlayers == 2 {
             self.selectedBestOf = match.isDoubles ? 5 : 7
         } else {
             self.selectedBestOf = 5
         }
-        self.showingToss = true
+        
+        self.activeMatchToStart = match
     }
     
     func launchScoreboard() {
@@ -364,7 +497,7 @@ struct MatchSetupView: View {
             isTest: isTestMatch
         )
         
-        showingToss = false
+        activeMatchToStart = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { path.append(config) }
     }
 }
@@ -380,6 +513,7 @@ struct TeamSelectionColumn: View {
     let getLetter: (String, Bool) -> String
     let onMoveUp: (String) -> Void
     let onMoveDown: (String) -> Void
+    let onDelete: (String) -> Void
     let onAdd: () -> Void
     
     var body: some View {
@@ -438,7 +572,7 @@ struct TeamSelectionColumn: View {
                                         Image(systemName: "chevron.down").font(.caption).padding(6).background(Color.white.opacity(0.1)).cornerRadius(5)
                                     }.disabled(idx == roster.count - 1)
                                 }
-                                Button(action: { roster.removeAll { $0 == name } }) {
+                                Button(action: { onDelete(name) }) {
                                     Image(systemName: "trash.fill").font(.caption).foregroundColor(.red).padding(6).frame(maxWidth: .infinity).background(Color.red.opacity(0.1)).cornerRadius(5)
                                 }
                             }
@@ -465,6 +599,8 @@ struct TossView: View {
     @Binding var selectedInitialReceiver: String
     let onStart: () -> Void
     
+    @State private var showingConfirmAlert = false
+    
     var body: some View {
         VStack(spacing: 25) {
             Text("Match Toss").font(.largeTitle.bold())
@@ -481,21 +617,75 @@ struct TossView: View {
             
             VStack(alignment: .leading, spacing: 20) {
                 Text("1. Who is serving first?").font(.headline)
-                Picker("Server", selection: $selectedInitialServer) { ForEach(selectedHome + selectedAway, id: \.self) { Text($0).tag($0) } }.pickerStyle(.wheel).frame(height: 100)
+                
+                HStack(spacing: 15) {
+                    ForEach(selectedHome + selectedAway, id: \.self) { player in
+                        Button(action: {
+                            selectedInitialServer = player
+                            if isDoubles {
+                                let validReceivers = selectedHome.contains(player) ? selectedAway : selectedHome
+                                if !validReceivers.contains(selectedInitialReceiver) {
+                                    selectedInitialReceiver = validReceivers.first ?? ""
+                                }
+                            }
+                        }) {
+                            Text(player)
+                                .font(.title3.bold())
+                                .padding()
+                                .frame(maxWidth: .infinity)
+                                .background(selectedInitialServer == player ? Color.yellow : Color.gray.opacity(0.3))
+                                .foregroundColor(selectedInitialServer == player ? .black : .white)
+                                .cornerRadius(10)
+                        }
+                    }
+                }
                 
                 if isDoubles {
                     Text("2. Who is receiving?").font(.headline)
                     let validReceivers = selectedHome.contains(selectedInitialServer) ? selectedAway : selectedHome
-                    Picker("Receiver", selection: $selectedInitialReceiver) { ForEach(validReceivers, id: \.self) { Text($0).tag($0) } }.pickerStyle(.segmented)
+                    
+                    HStack(spacing: 15) {
+                        ForEach(validReceivers, id: \.self) { player in
+                            Button(action: {
+                                selectedInitialReceiver = player
+                            }) {
+                                Text(player)
+                                    .font(.title3.bold())
+                                    .padding()
+                                    .frame(maxWidth: .infinity)
+                                    .background(selectedInitialReceiver == player ? Color.cyan : Color.gray.opacity(0.3))
+                                    .foregroundColor(selectedInitialReceiver == player ? .black : .white)
+                                    .cornerRadius(10)
+                            }
+                        }
+                    }
                 }
                 
-                Text("Position of \(selectedInitialServer)?").font(.headline)
+                Text("Position of \(selectedInitialServer.isEmpty ? "Server" : selectedInitialServer)?").font(.headline)
                 HStack {
                     Button("Wall Side") { serverStartsOnWall = true }.padding().frame(maxWidth: .infinity).background(serverStartsOnWall ? Color.blue : Color.gray.opacity(0.2)).foregroundColor(serverStartsOnWall ? .white : .primary).cornerRadius(10)
                     Button("Grandstand Side") { serverStartsOnWall = false }.padding().frame(maxWidth: .infinity).background(!serverStartsOnWall ? Color.blue : Color.gray.opacity(0.2)).foregroundColor(!serverStartsOnWall ? .white : .primary).cornerRadius(10)
                 }
             }.padding()
-            Button("START MATCH") { onStart() }.font(.title2.bold()).frame(maxWidth: .infinity, maxHeight: 60).background(Color.green).foregroundColor(.white).cornerRadius(15).padding()
+            
+            Button("START MATCH") {
+                if selectedInitialServer.isEmpty {
+                    selectedInitialServer = selectedHome.first ?? ""
+                }
+                showingConfirmAlert = true
+            }
+            .font(.title2.bold())
+            .frame(maxWidth: .infinity, maxHeight: 60)
+            .background(Color.green)
+            .foregroundColor(.white)
+            .cornerRadius(15)
+            .padding()
+        }
+        .alert("Confirm First Server", isPresented: $showingConfirmAlert) {
+            Button("No, Wait", role: .cancel) { }
+            Button("Yes, Start Match") { onStart() }
+        } message: {
+            Text("Are you sure '\(selectedInitialServer)' is serving first?")
         }
     }
 }

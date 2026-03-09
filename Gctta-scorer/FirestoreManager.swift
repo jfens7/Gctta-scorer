@@ -365,7 +365,7 @@ class FirestoreManager: ObservableObject {
     }
     
     // MARK: - FINAL UPLOAD (PENDING APPROVAL)
-    func uploadFinalScore(fixture: Fixture, homePlayers: [String], awayPlayers: [String], history: [SetRecord], isTest: Bool, totalTime: String, activeTime: String) {
+    func uploadFinalScore(fixture: Fixture, homePlayers: [String], awayPlayers: [String], history: [SetRecord], isTest: Bool, totalTime: String, activeTime: String, richStats: [String: Any]) {
         let gameHistoryString = history.map { "\($0.homeScore)-\($0.awayScore)" }.joined(separator: ", ")
         let hSets = history.filter { $0.homeScore > $0.awayScore }.count
         let aSets = history.filter { $0.awayScore > $0.homeScore }.count
@@ -388,7 +388,8 @@ class FirestoreManager: ObservableObject {
             "timestamp": FieldValue.serverTimestamp(),
             "date": fixture.date,
             "match_status": "Finished",
-            "status": "pending" // ⚠️ PLACES MATCH IN ADMIN APPROVAL QUEUE ⚠️
+            "status": "pending", // ⚠️ PLACES MATCH IN ADMIN APPROVAL QUEUE ⚠️
+            "richStats": richStats // ✅ Added the richStats dictionary here!
         ]
         
         db.collection("match_results").addDocument(data: data)
